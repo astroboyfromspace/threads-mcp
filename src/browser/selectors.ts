@@ -1,0 +1,48 @@
+/**
+ * Все зацепки за вёрстку Threads собраны здесь.
+ *
+ * Threads не даёт стабильных data-атрибутов, а классы генерируются сборщиком и
+ * меняются от релиза к релизу. Поэтому опора — на роли и подписи доступности:
+ * они меняются реже разметки. Когда Threads всё же переедет, чинить придётся
+ * только этот файл.
+ *
+ * Подписи дублируются на русском и английском: язык интерфейса зависит от
+ * настроек аккаунта, и завязываться на один язык — гарантированная поломка.
+ */
+
+export const URLS = {
+  home: "https://www.threads.net/",
+  login: "https://www.threads.net/login",
+  profile: (username: string) => `https://www.threads.net/@${username.replace(/^@/, "")}`,
+  post: (username: string, shortcode: string) =>
+    `https://www.threads.net/@${username.replace(/^@/, "")}/post/${shortcode}`,
+} as const;
+
+/** Кнопки, различающиеся текущим состоянием: подпись меняется после нажатия. */
+export const BUTTON_LABELS = {
+  like: [/^нравится$/i, /^like$/i],
+  unlike: [/^не нравится$/i, /^unlike$/i],
+  follow: [/^подписаться$/i, /^follow$/i],
+  unfollow: [/^отписаться$/i, /^подписки$/i, /^unfollow$/i, /^following$/i],
+  repost: [/^репост$/i, /^repost$/i],
+  removeRepost: [/^удалить репост$/i, /^remove repost$/i, /^undo repost$/i],
+  confirmRepost: [/^репост$/i, /^repost$/i],
+  confirmUnfollow: [/^отписаться$/i, /^unfollow$/i],
+} as const;
+
+/**
+ * Признак того, что мы разлогинены: страница предлагает войти.
+ * Проверяется по нескольким приметам сразу — одна может отвалиться.
+ */
+export const LOGGED_OUT_HINTS = [
+  /войти/i,
+  /log in/i,
+  /sign up/i,
+  /создать аккаунт/i,
+] as const;
+
+/** Контейнер отдельного поста в ленте. */
+export const POST_CONTAINER = '[data-pressable-container="true"]';
+
+/** Ссылка на пост — из неё достаётся автор и shortcode. */
+export const POST_PERMALINK = 'a[href*="/post/"]';

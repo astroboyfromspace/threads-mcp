@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.log
+
+# Секреты и состояние — никогда в git
+.env
+.env.*
+!.env.example
+data/
+var/
+profile/
+failures/

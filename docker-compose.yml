@@ -7,6 +7,11 @@ services:
   api:
     build: .
     restart: unless-stopped
+    # Потолок памяти — «забор» после инцидента 2026-07-21 (контейнер без лимита
+    # вызвал host-wide OOM, ядро убило mongod соседнего проекта). Внутри живёт
+    # браузерный профиль, поэтому запас больше обычного.
+    mem_limit: 2g
+    memswap_limit: 3g
     env_file: .env
     environment:
       # Внутри контейнера порт всегда 8080 — эта сеть наша, конфликтовать не с чем.
@@ -33,6 +38,9 @@ services:
     profiles: ["login"]
     image: mcr.microsoft.com/playwright:v1.50.0-noble
     restart: "no"
+    # Тот же «забор», что и у api: графический браузер легко раздувается.
+    mem_limit: 2g
+    memswap_limit: 3g
     environment:
       DISPLAY: ":99"
     volumes:

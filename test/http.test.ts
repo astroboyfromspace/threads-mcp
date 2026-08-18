@@ -10,7 +10,7 @@ vi.mock("../src/browser/session.js", () => ({
   session: { needsLogin: false, queueDepth: 0, checkLogin: vi.fn(), markLoggedIn: vi.fn(), markLoggedOut: vi.fn() },
 }));
 
-const { execute } = await import("../src/actions/registry.js");
+const { actions, execute } = await import("../src/actions/registry.js");
 const { buildServer } = await import("../src/http/server.js");
 const { ActionError } = await import("../src/errors.js");
 
@@ -175,5 +175,65 @@ describe("колбэки Meta", () => {
     const body = response.json();
     expect(typeof body.url).toBe("string");
     expect(body.confirmation_code).toMatch(/\S/);
+  });
+});
+
+describe("MCP по сети", () => {
+  // Клиенты MCP всегда присылают этот Accept, транспорт без него отвечает 406.
+  const MCP = { ...AUTH, "content-type": "application/json", accept: "application/json, text/event-stream" };
+
+  const rpc = (method: string, params: unknown, id = 1) =>
+    app.inject({ method: "POST", url: "/mcp", headers: MCP, payload: { jsonrpc: "2.0", id, method, params } });
+
+  it("не пускает без токена", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      payload: { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    });
+
+    expect(response.statusCode).toBe(401);
+  });
+
+  it("здоровается и представляется", async () => {
+    const response = await rpc("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().result.serverInfo).toMatchObject({ name: "threads" });
+  });
+
+  it("отдаёт все действия реестра как инструменты", async () => {
+    const response = await rpc("tools/list", {});
+    const names = response.json().result.tools.map((tool: { name: string }) => tool.name);
+
+    expect(names).toContain("publish_post");
+    expect(names).toContain("like_post");
+    expect(names).toHaveLength(Object.keys(actions).length);
+  });
+
+  it("выполняет действие и возвращает конверт", async () => {
+    vi.mocked(execute).mockResolvedValueOnce({ id: "42" });
+
+    const response = await rpc("tools/call", { name: "publish_post", arguments: { text: "привет" } });
+    const result = response.json().result;
+
+    expect(execute).toHaveBeenCalledWith("publish_post", { text: "привет" });
+    expect(JSON.parse(result.content[0].text)).toEqual({ ok: true, data: { id: "42" } });
+    expect(result.isError).toBeUndefined();
+  });
+
+  it("ошибку действия отдаёт кодом в конверте, а не падением протокола", async () => {
+    vi.mocked(execute).mockRejectedValueOnce(new ActionError("NEEDS_LOGIN", "нужен вход"));
+
+    const response = await rpc("tools/call", { name: "like_post", arguments: { url: "https://www.threads.net/@a/post/b" } });
+    const result = response.json().result;
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).error.code).toBe("NEEDS_LOGIN");
   });
 });

@@ -1,22 +1,21 @@
 /**
- * MCP-сервер поверх того же реестра действий, что и HTTP API.
+ * MCP по stdio — для случая, когда агент запускается на том же сервере.
  *
- * Запускается по stdio — так его подключает агент. Собственной логики здесь
- * нет: только перевод инструментов MCP в вызовы HTTP API.
+ * Основной способ подключения другой: сетевой, POST /mcp у самого сервиса (см.
+ * src/mcp/http.ts). Здесь остаётся локальный вариант для отладки и для агентов,
+ * которым удобнее порождать процесс, чем ходить по сети.
  *
- * Почему через HTTP, а не напрямую через execute(): браузерный профиль Chromium
- * не рассчитан на два процесса сразу, а сервис в контейнере держит его открытым
- * постоянно. Ходили бы напрямую — рядом поднялся бы второй Chromium на той же
- * папке профиля, и рано или поздно два экземпляра побили бы cookies, после чего
- * логиниться в Threads пришлось бы заново руками через noVNC. Заодно все агенты
- * встают в общую очередь сервиса и живут под общими суточными лимитами.
+ * Действия не выполняются здесь, а уходят в HTTP API. Chromium не рассчитан на
+ * два процесса с одной папкой профиля, а сервис в контейнере держит браузер
+ * открытым постоянно: выполняй этот процесс действия сам, рядом поднялся бы
+ * второй Chromium на том же профиле, и рано или поздно два экземпляра побили бы
+ * cookies — логиниться в Threads пришлось бы заново руками через noVNC.
  */
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-import { actions, type ActionName, type AnyActionDefinition } from "../actions/registry.js";
 import { config } from "../config.js";
+import type { ActionName } from "../actions/registry.js";
 import { ActionError, toEnvelope, type Envelope } from "../errors.js";
+import { createMcpServer } from "./server.js";
 
 /**
  * Адрес сервиса. По умолчанию — петлевой интерфейс: MCP запускают внутри того же
@@ -24,14 +23,8 @@ import { ActionError, toEnvelope, type Envelope } from "../errors.js";
  */
 const apiUrl = (process.env.THREADS_API_URL ?? `http://127.0.0.1:${config.http.port}`).replace(/\/+$/, "");
 
-function shapeOf(definition: AnyActionDefinition): z.ZodRawShape {
-  // Все действия описаны через z.object, поэтому shape всегда есть; на всякий
-  // случай отдаём пустой, чтобы не падать при будущих изменениях реестра.
-  return definition.input instanceof z.ZodObject ? (definition.input.shape as z.ZodRawShape) : {};
-}
-
 /** Зовёт действие у сервиса и возвращает его конверт как есть. */
-async function callAction(name: ActionName, args: unknown): Promise<Envelope<unknown>> {
+async function callOverHttp(name: ActionName, args: unknown): Promise<Envelope<unknown>> {
   let response: Response;
   try {
     response = await fetch(`${apiUrl}/actions/${name}`, {
@@ -68,22 +61,8 @@ async function callAction(name: ActionName, args: unknown): Promise<Envelope<unk
 }
 
 async function main(): Promise<void> {
-  const server = new McpServer({ name: "threads", version: "0.1.0" });
-
-  for (const [name, definition] of Object.entries(actions) as Array<[ActionName, AnyActionDefinition]>) {
-    server.tool(name, definition.description, shapeOf(definition), async (args: unknown) => {
-      const envelope = await callAction(name, args);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
-        // Ошибку отдаём как результат, а не как исключение протокола: агенту
-        // нужен разбираемый код (NEEDS_LOGIN, RATE_LIMITED), чтобы решить, что делать.
-        ...(envelope.ok ? {} : { isError: true }),
-      };
-    });
-  }
-
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const server = createMcpServer(callOverHttp);
+  await server.connect(new StdioServerTransport());
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => process.exit(0));

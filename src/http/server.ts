@@ -10,6 +10,7 @@ import {
   verifyOAuthState,
 } from "../graph/token.js";
 import { loadToken } from "../db.js";
+import { registerMcpRoutes } from "../mcp/http.js";
 
 const OAUTH_SCOPES = [
   "threads_basic",
@@ -112,6 +113,7 @@ export function buildServer(): FastifyInstance {
   registerBrowserRoutes(app);
   registerOAuthRoutes(app);
   registerMetaCallbackRoutes(app);
+  registerMcpRoutes(app, requireAuth);
   return app;
 }
 

@@ -13,12 +13,7 @@
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { loadToken } from "../src/db.js";
-import {
-  buildAuthorizationUrl,
-  exchangeCodeForShortLivedToken,
-  exchangeForLongLivedToken,
-  persistLongLivedToken,
-} from "../src/graph/token.js";
+import { buildAuthorizationUrl, completeOAuth } from "../src/graph/token.js";
 
 const SCOPES = [
   "threads_basic",
@@ -43,9 +38,7 @@ async function main(): Promise<void> {
   const code = raw.replace(/#_$/, "");
   if (!code) throw new Error("Код не введён");
 
-  const shortLived = await exchangeCodeForShortLivedToken(code);
-  const longLived = await exchangeForLongLivedToken(shortLived.accessToken);
-  const stored = persistLongLivedToken(longLived, shortLived.userId);
+  const stored = await completeOAuth(code);
 
   console.log(`\nГотово. Токен сохранён для user_id=${stored.userId}.`);
   console.log(`Действует до ${new Date(stored.expiresAt * 1000).toISOString()} и будет продлеваться автоматически.`);

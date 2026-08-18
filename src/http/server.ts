@@ -6,9 +6,7 @@ import { httpStatusFor, toEnvelope, ActionError } from "../errors.js";
 import { session } from "../browser/session.js";
 import {
   buildAuthorizationUrl,
-  exchangeCodeForShortLivedToken,
-  exchangeForLongLivedToken,
-  persistLongLivedToken,
+  completeOAuth,
   verifyOAuthState,
 } from "../graph/token.js";
 import { loadToken } from "../db.js";
@@ -196,9 +194,7 @@ function registerOAuthRoutes(app: FastifyInstance): void {
       }
 
       try {
-        const shortLived = await exchangeCodeForShortLivedToken(code.replace(/#_$/, ""));
-        const longLived = await exchangeForLongLivedToken(shortLived.accessToken);
-        const stored = persistLongLivedToken(longLived, shortLived.userId);
+        const stored = await completeOAuth(code);
 
         reply.type("text/plain; charset=utf-8");
         return (

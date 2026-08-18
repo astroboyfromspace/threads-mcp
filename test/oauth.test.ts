@@ -76,10 +76,15 @@ describe("защита callback от подмены аккаунта", () => {
   it("принимает код с настоящим state", async () => {
     const state = issueState();
 
+    // user_id из обмена кода (42) не совпадает с настоящим id аккаунта (48) —
+    // Meta действительно так отвечает. Сохраняться должен id из ручки me.
     vi.stubGlobal("fetch", async (input: URL | string) => {
       const url = String(input);
       if (url.includes("oauth/access_token")) {
         return Response.json({ access_token: "short-lived", user_id: 42 });
+      }
+      if (url.includes("/me")) {
+        return Response.json({ id: "48" });
       }
       return Response.json({ access_token: "long-lived", token_type: "bearer", expires_in: 5_183_944 });
     });
@@ -87,19 +92,24 @@ describe("защита callback от подмены аккаунта", () => {
     const response = await app.inject({ method: "GET", url: `/oauth/callback?code=наш-код&state=${state}` });
 
     expect(response.statusCode).toBe(200);
-    expect(response.body).toContain("user_id=42");
+    expect(response.body).toContain("user_id=48");
 
     const row = getDb().prepare("SELECT user_id FROM token WHERE id = 1").get() as { user_id: string };
-    expect(row.user_id).toBe("42");
+    expect(row.user_id).toBe("48");
   });
 
   it("state одноразовый — повторный переход отклоняется", async () => {
     const state = issueState();
-    vi.stubGlobal("fetch", async (input: URL | string) =>
-      String(input).includes("oauth/access_token")
-        ? Response.json({ access_token: "short-lived", user_id: 42 })
-        : Response.json({ access_token: "long-lived", token_type: "bearer", expires_in: 5_183_944 }),
-    );
+    vi.stubGlobal("fetch", async (input: URL | string) => {
+      const url = String(input);
+      if (url.includes("oauth/access_token")) {
+        return Response.json({ access_token: "short-lived", user_id: 42 });
+      }
+      if (url.includes("/me")) {
+        return Response.json({ id: "48" });
+      }
+      return Response.json({ access_token: "long-lived", token_type: "bearer", expires_in: 5_183_944 });
+    });
 
     const first = await app.inject({ method: "GET", url: `/oauth/callback?code=наш-код&state=${state}` });
     expect(first.statusCode).toBe(200);

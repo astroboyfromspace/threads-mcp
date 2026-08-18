@@ -10,7 +10,7 @@ const DAY_SECONDS = 86_400;
 type TokenResponse = { access_token: string; token_type: string; expires_in: number };
 
 /** Меняет короткоживущий код авторизации на короткоживущий токен. */
-export async function exchangeCodeForShortLivedToken(code: string): Promise<{ accessToken: string; userId: string }> {
+async function exchangeCodeForShortLivedToken(code: string): Promise<{ accessToken: string; userId: string }> {
   const form = new URLSearchParams({
     client_id: config.threads.appId,
     client_secret: config.threads.appSecret,
@@ -33,7 +33,7 @@ export async function exchangeCodeForShortLivedToken(code: string): Promise<{ ac
 }
 
 /** Меняет короткоживущий токен на 60-дневный. */
-export async function exchangeForLongLivedToken(shortLivedToken: string): Promise<TokenResponse> {
+async function exchangeForLongLivedToken(shortLivedToken: string): Promise<TokenResponse> {
   const url = new URL(`${config.threads.apiBase}/access_token`);
   url.searchParams.set("grant_type", "th_exchange_token");
   url.searchParams.set("client_secret", config.threads.appSecret);
@@ -61,7 +61,7 @@ async function refreshLongLivedToken(token: string): Promise<TokenResponse> {
   return body;
 }
 
-export function persistLongLivedToken(token: TokenResponse, userId: string): StoredToken {
+function persistLongLivedToken(token: TokenResponse, userId: string): StoredToken {
   const stored: StoredToken = {
     accessToken: token.access_token,
     userId,
@@ -69,6 +69,24 @@ export function persistLongLivedToken(token: TokenResponse, userId: string): Sto
   };
   saveToken(stored);
   return stored;
+}
+
+/**
+ * Завершает OAuth: меняет код авторизации на 60-дневный токен и сохраняет его.
+ *
+ * user_id из обмена кода Meta выдаёт неверным (он не совпадает с настоящим id
+ * аккаунта, и Graph API по нему отвечает «объект не существует»), поэтому id
+ * спрашиваем у самого API через ручку me — ей верить можно.
+ */
+export async function completeOAuth(code: string): Promise<StoredToken> {
+  const shortLived = await exchangeCodeForShortLivedToken(code.replace(/#_$/, ""));
+  const longLived = await exchangeForLongLivedToken(shortLived.accessToken);
+
+  const me = await new GraphClient(longLived.access_token).get<{ id?: string | number }>("me", { fields: "id" });
+  if (!me.id) {
+    throw new ActionError("UPSTREAM", "Ручка me не вернула id пользователя — токен получен, но сохранять нечего");
+  }
+  return persistLongLivedToken(longLived, String(me.id));
 }
 
 /**

@@ -146,3 +146,34 @@ describe("GET /actions", () => {
     expect(names).toContain("like_post");
   });
 });
+
+describe("колбэки Meta", () => {
+  // Meta шлёт их как form-encoded и без нашего bearer-токена: она о нём не знает.
+  const META = { "content-type": "application/x-www-form-urlencoded" };
+  const PAYLOAD = "signed_request=подпись.полезная_нагрузка";
+
+  it("uninstall отвечает 200 на form-encoded запрос без токена", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/threads/uninstall",
+      headers: META,
+      payload: PAYLOAD,
+    });
+
+    expect(response.statusCode).toBe(200);
+  });
+
+  it("delete отвечает форматом, который ждёт проверка Meta", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/threads/delete",
+      headers: META,
+      payload: PAYLOAD,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(typeof body.url).toBe("string");
+    expect(body.confirmation_code).toMatch(/\S/);
+  });
+});

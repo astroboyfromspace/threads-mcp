@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { config } from "../config.js";
 import { actions, describeActions, execute, isActionName } from "../actions/registry.js";
 import { httpStatusFor, toEnvelope, ActionError } from "../errors.js";
@@ -102,9 +102,36 @@ export function buildServer(): FastifyInstance {
     }
   });
 
+  // Колбэки Meta приходят как form-encoded, а Fastify из коробки понимает только
+  // JSON и на остальное отвечает 415. Тело нам не нужно, поэтому парсер отдаёт
+  // его строкой как есть.
+  app.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    { parseAs: "string" },
+    (_request, body, done) => done(null, body),
+  );
+
   registerBrowserRoutes(app);
   registerOAuthRoutes(app);
+  registerMetaCallbackRoutes(app);
   return app;
+}
+
+/**
+ * Колбэки удаления приложения и удаления данных. Их адреса обязательны в
+ * настройках приложения Meta, иначе она не даёт сохранить конфигурацию.
+ *
+ * Это заглушки: они отвечают в ожидаемом формате, но ничего не удаляют.
+ * Подпись signed_request не проверяется — проверять нечего, обработчики не
+ * трогают ни токен, ни состояние, поэтому подделать через них нечего.
+ */
+function registerMetaCallbackRoutes(app: FastifyInstance): void {
+  app.post("/threads/uninstall", async () => ({ ok: true }));
+
+  app.post("/threads/delete", async () => {
+    const origin = new URL(config.threads.redirectUri).origin;
+    return { url: `${origin}/threads/delete`, confirmation_code: randomUUID() };
+  });
 }
 
 /** Управление браузерным профилем: нужно, чтобы человек мог войти руками через noVNC. */

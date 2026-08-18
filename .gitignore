@@ -10,3 +10,9 @@ data/
 var/
 profile/
 failures/
+
+# Мусор редакторов и ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

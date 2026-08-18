@@ -1,39 +1,30 @@
+# Имя проекта задано явно: на хосте с несколькими compose-проектами имя по
+# умолчанию берётся из названия каталога, и контейнеры/тома чужих сервисов
+# могут случайно совпасть с нашими.
+name: threads-api
+
 services:
   api:
     build: .
     restart: unless-stopped
     env_file: .env
     environment:
+      # Внутри контейнера порт всегда 8080 — эта сеть наша, конфликтовать не с чем.
       HOST: 0.0.0.0
       PORT: 8080
       DATA_DIR: /var/lib/threads-api
     volumes:
       - state:/var/lib/threads-api
-    # Наружу не публикуется: доступ только через Caddy.
-    expose:
-      - "8080"
+    # Наружу — только петлевой интерфейс хоста и порт из .env.
+    # TLS и маршрутизацию делает хостовый nginx.
+    ports:
+      - "${API_BIND_ADDR:-127.0.0.1}:${API_BIND_PORT:-18080}:8080"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      DOMAIN: ${DOMAIN}
-      NOVNC_USER_HASH: ${NOVNC_USER_HASH}
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - api
 
   # Графический сеанс для ручного логина в Threads.
   # Поднимается только по требованию: docker compose --profile login up -d novnc
@@ -47,11 +38,9 @@ services:
     volumes:
       - state:/var/lib/threads-api
       - ./deploy/login-session.sh:/usr/local/bin/login-session.sh:ro
-    expose:
-      - "6080"
+    ports:
+      - "${API_BIND_ADDR:-127.0.0.1}:${NOVNC_BIND_PORT:-16080}:6080"
     command: ["bash", "/usr/local/bin/login-session.sh"]
 
 volumes:
   state:
-  caddy_data:
-  caddy_config:

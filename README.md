@@ -17,17 +17,29 @@
 
 ## Настройка
 
+Подробный пошаговый деплой — в [`docs/DEPLOY-RUNBOOK.md`](docs/DEPLOY-RUNBOOK.md).
+Ниже сжатая версия.
+
 ```bash
 cp .env.example .env
-openssl rand -hex 32          # положи в API_TOKEN
-htpasswd -nbB admin 'пароль'  # хеш после «admin:» положи в NOVNC_USER_HASH
+openssl rand -hex 32   # положи в API_TOKEN
 ```
 
-В `.env` заполни `API_TOKEN`, `THREADS_APP_ID`, `THREADS_APP_SECRET`,
-`THREADS_REDIRECT_URI`, а также `DOMAIN` и `NOVNC_USER_HASH` — их читает Caddy.
+Заполни `API_TOKEN`, `THREADS_APP_ID`, `THREADS_APP_SECRET`, `THREADS_REDIRECT_URI`,
+`DOMAIN` и порты `API_BIND_PORT` / `NOVNC_BIND_PORT`.
+
+Все хостовые порты задаются только в `.env`: оттуда их берёт и docker-compose, и
+генератор конфига nginx, так что разъехаться они не могут. Контейнеры слушают
+исключительно `127.0.0.1` — наружу сервис отдаёт nginx.
 
 ```bash
+./deploy/check-ports.sh          # не заняты ли порты соседними сервисами
 docker compose up -d --build
+
+sudo htpasswd -cB /etc/nginx/threads-novnc.htpasswd admin   # пароль к noVNC
+sudo certbot --nginx -d <домен>
+sudo ./deploy/render-nginx.sh --install                     # конфиг из .env
+
 curl https://<домен>/health
 ```
 

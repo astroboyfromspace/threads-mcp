@@ -9,6 +9,7 @@ import {
   exchangeCodeForShortLivedToken,
   exchangeForLongLivedToken,
   persistLongLivedToken,
+  verifyOAuthState,
 } from "../graph/token.js";
 import { loadToken } from "../db.js";
 
@@ -132,8 +133,8 @@ function registerBrowserRoutes(app: FastifyInstance): void {
 }
 
 /**
- * OAuth-приём кода. Требует того же bearer-токена на старте, а callback защищён
- * тем, что код одноразовый и без app secret бесполезен.
+ * OAuth. Старт требует bearer-токена и выдаёт одноразовый state; callback
+ * открыт (иначе Threads не сможет вернуть браузер) и проверяет этот state.
  */
 function registerOAuthRoutes(app: FastifyInstance): void {
   app.get("/oauth/start", async (request, reply) => {
@@ -141,10 +142,10 @@ function registerOAuthRoutes(app: FastifyInstance): void {
     reply.redirect(buildAuthorizationUrl(OAUTH_SCOPES));
   });
 
-  app.get<{ Querystring: { code?: string; error?: string; error_description?: string } }>(
+  app.get<{ Querystring: { code?: string; state?: string; error?: string; error_description?: string } }>(
     "/oauth/callback",
     async (request, reply) => {
-      const { code, error, error_description: description } = request.query;
+      const { code, state, error, error_description: description } = request.query;
 
       if (error) {
         reply.code(400);
@@ -153,6 +154,18 @@ function registerOAuthRoutes(app: FastifyInstance): void {
       if (!code) {
         reply.code(400);
         return "В запросе нет параметра code";
+      }
+
+      // Ручка обязана быть открытой — Threads редиректит сюда браузер без
+      // заголовков. Единственное, что отличает наш запрос от чужого, — state,
+      // выданный на /oauth/start. Без этой проверки посторонний мог бы прислать
+      // свой код и заменить аккаунт, от имени которого работает сервис.
+      try {
+        verifyOAuthState(state);
+      } catch (err) {
+        request.log.warn(`Отклонён OAuth callback с чужим state (ip=${request.ip})`);
+        reply.code(400).type("text/plain; charset=utf-8");
+        return err instanceof Error ? err.message : "Некорректный state";
       }
 
       try {

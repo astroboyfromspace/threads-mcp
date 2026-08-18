@@ -40,7 +40,38 @@ function migrate(database: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS action_log_action_time
       ON action_log (action, created_at);
+
+    CREATE TABLE IF NOT EXISTS oauth_state (
+      state      TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL
+    );
   `);
+}
+
+const OAUTH_STATE_TTL_SECONDS = 15 * 60;
+
+/** Запоминает выданный state, чтобы потом узнать свой же запрос авторизации. */
+export function saveOAuthState(state: string): void {
+  const db = getDb();
+  db.prepare(`INSERT OR REPLACE INTO oauth_state (state, created_at) VALUES (?, ?)`).run(
+    state,
+    Math.floor(Date.now() / 1000),
+  );
+  // Заодно подчищаем протухшие: таблица не должна расти от брошенных попыток.
+  db.prepare(`DELETE FROM oauth_state WHERE created_at < ?`).run(
+    Math.floor(Date.now() / 1000) - OAUTH_STATE_TTL_SECONDS,
+  );
+}
+
+/**
+ * Проверяет и гасит state. Одноразовость обязательна: иначе перехваченную
+ * ссылку можно было бы переиграть.
+ */
+export function consumeOAuthState(state: string): boolean {
+  const db = getDb();
+  const cutoff = Math.floor(Date.now() / 1000) - OAUTH_STATE_TTL_SECONDS;
+  const result = db.prepare(`DELETE FROM oauth_state WHERE state = ? AND created_at >= ?`).run(state, cutoff);
+  return result.changes > 0;
 }
 
 export function saveToken(token: StoredToken): void {

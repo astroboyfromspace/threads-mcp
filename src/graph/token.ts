@@ -1,5 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { config } from "../config.js";
-import { loadToken, saveToken, type StoredToken } from "../db.js";
+import { consumeOAuthState, loadToken, saveOAuthState, saveToken, type StoredToken } from "../db.js";
 import { ActionError } from "../errors.js";
 import { GraphClient } from "./client.js";
 
@@ -102,12 +103,34 @@ export async function getClient(): Promise<{ client: GraphClient; userId: string
   return { client: new GraphClient(token.accessToken), userId: token.userId };
 }
 
-/** URL страницы, на которой владелец разрешает приложению доступ к своему аккаунту. */
+/**
+ * URL страницы, на которой владелец разрешает приложению доступ к своему аккаунту.
+ *
+ * Каждый вызов выдаёт одноразовый state и запоминает его. Без этой проверки
+ * callback принимал бы любой присланный код: посторонний мог бы открыть
+ * /oauth/callback?code=… со своим кодом и подменить аккаунт, от имени которого
+ * работает сервис.
+ */
 export function buildAuthorizationUrl(scopes: readonly string[]): string {
+  const state = randomBytes(32).toString("base64url");
+  saveOAuthState(state);
+
   const url = new URL("https://threads.net/oauth/authorize");
   url.searchParams.set("client_id", config.threads.appId);
   url.searchParams.set("redirect_uri", config.threads.redirectUri);
   url.searchParams.set("scope", scopes.join(","));
   url.searchParams.set("response_type", "code");
+  url.searchParams.set("state", state);
   return url.toString();
+}
+
+/** Проверяет, что код пришёл в ответ на наш собственный запрос авторизации. */
+export function verifyOAuthState(state: string | undefined): void {
+  if (!state || !consumeOAuthState(state)) {
+    throw new ActionError(
+      "INVALID_INPUT",
+      "Неизвестный или просроченный state — запрос авторизации начат не этим сервисом. Начни заново с /oauth/start",
+      { retryable: false },
+    );
+  }
 }

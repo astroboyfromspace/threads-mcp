@@ -18,16 +18,25 @@ export const URLS = {
     `https://www.threads.net/@${username.replace(/^@/, "")}/post/${shortcode}`,
 } as const;
 
-/** Кнопки, различающиеся текущим состоянием: подпись меняется после нажатия. */
+/**
+ * Кнопки, различающиеся текущим состоянием: подпись меняется после нажатия.
+ *
+ * Подписи закреплены только слева. Доступное имя кнопки склеивается из
+ * aria-label иконки и счётчика рядом, поэтому у поста с лайками имя выглядит
+ * как «Unlike 1», и закреплённое справа `$` перестаёт совпадать — молча, ровно
+ * с того момента, как под постом появился первый лайк. Начало при этом
+ * различает состояния: «like» не совпадает с «Unlike», «репост» — с «удалить
+ * репост».
+ */
 export const BUTTON_LABELS = {
-  like: [/^нравится$/i, /^like$/i],
-  unlike: [/^не нравится$/i, /^unlike$/i],
-  follow: [/^подписаться$/i, /^follow$/i],
-  unfollow: [/^отписаться$/i, /^подписки$/i, /^unfollow$/i, /^following$/i],
-  repost: [/^репост$/i, /^repost$/i],
-  removeRepost: [/^удалить репост$/i, /^remove repost$/i, /^undo repost$/i],
-  confirmRepost: [/^репост$/i, /^repost$/i],
-  confirmUnfollow: [/^отписаться$/i, /^unfollow$/i],
+  like: [/^нравится/i, /^like/i],
+  unlike: [/^не нравится/i, /^unlike/i],
+  follow: [/^подписаться/i, /^follow/i],
+  unfollow: [/^отписаться/i, /^подписки/i, /^unfollow/i, /^following/i],
+  repost: [/^репост/i, /^repost/i],
+  removeRepost: [/^удалить репост/i, /^убрать репост/i, /^remove repost/i, /^undo repost/i, /^remove/i],
+  confirmRepost: [/^репост/i, /^repost/i],
+  confirmUnfollow: [/^отписаться/i, /^unfollow/i],
 } as const;
 
 /**

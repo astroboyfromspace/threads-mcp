@@ -3,11 +3,13 @@ import { ActionError } from "../errors.js";
 import { BUTTON_LABELS, LOGGED_OUT_HINTS, POST_CONTAINER, POST_PERMALINK, URLS } from "./selectors.js";
 import { captureFailure, humanDelay, session } from "./session.js";
 
-/** Ищет кнопку по любой из подписей (интерфейс может быть на русском или английском). */
-function buttonByLabels(scope: Page | Locator, labels: readonly RegExp[]): Locator {
-  const candidates = labels.map((label) => scope.getByRole("button", { name: label }));
+/** Ищет элемент нужной роли по любой из подписей (интерфейс может быть на русском или английском). */
+function byLabels(scope: Page | Locator, role: "button" | "menuitem", labels: readonly RegExp[]): Locator {
+  const candidates = labels.map((label) => scope.getByRole(role, { name: label }));
   return candidates.reduce((acc, next) => acc.or(next));
 }
+
+const buttonByLabels = (scope: Page | Locator, labels: readonly RegExp[]) => byLabels(scope, "button", labels);
 
 async function firstVisible(locator: Locator, timeoutMs = 8_000): Promise<Locator | null> {
   try {
@@ -40,6 +42,25 @@ async function selectorMiss(page: Page, label: string, message: string): Promise
 
 export type PostRef = { url: string };
 
+/**
+ * Сужает поиск до контейнера конкретного поста.
+ *
+ * Если опознать не удалось — отдаёт первый контейнер на странице: на странице
+ * поста это сам пост. Всю страницу возвращаем только когда контейнеров нет
+ * вовсе, иначе следующий же шаг молча ушёл бы искать кнопки по ответам.
+ */
+async function scopeToPost(page: Page, postUrl: string): Promise<Page | Locator> {
+  const containers = page.locator(POST_CONTAINER);
+  if ((await containers.count()) === 0) return page;
+
+  const shortcode = /\/post\/([^/?#]+)/.exec(postUrl)?.[1];
+  if (shortcode) {
+    const exact = containers.filter({ has: page.locator(`a[href*="/post/${shortcode}"]`) }).first();
+    if ((await exact.count()) > 0) return exact;
+  }
+  return containers.first();
+}
+
 async function toggleOnPost(
   postUrl: string,
   action: "like" | "unlike" | "repost" | "removeRepost",
@@ -47,35 +68,66 @@ async function toggleOnPost(
   return session.withPage(async (page) => {
     await open(page, postUrl);
 
-    const targetLabels = BUTTON_LABELS[action];
-    const oppositeLabels =
-      action === "like" ? BUTTON_LABELS.unlike
-      : action === "unlike" ? BUTTON_LABELS.like
-      : action === "repost" ? BUTTON_LABELS.removeRepost
-      : BUTTON_LABELS.repost;
+    // Ищем кнопки только внутри нужного поста: на странице лежат ещё и ответы,
+    // и родительский пост, если открыт ответ, — у всех такие же кнопки, и поиск
+    // по всей странице однажды поставит лайк не туда. Опознаём пост по его же
+    // shortcode в ссылке-пермалинке.
+    const scope = await scopeToPost(page, postUrl);
 
-    // Если кнопка уже в нужном состоянии, действие идемпотентно: ничего не делаем.
-    const alreadyDone = await firstVisible(buttonByLabels(page, oppositeLabels), 3_000);
-    const target = await firstVisible(buttonByLabels(page, targetLabels), 3_000);
+    // Лайк и репост устроены по-разному. У лайка состояние видно по самой
+    // кнопке: «Like» → «Unlike». У репоста кнопка всегда подписана «Repost», а
+    // состояние видно только в её меню: «Repost/Quote», когда репоста нет, и
+    // «Remove/Quote», когда он есть.
+    const isRepost = action === "repost" || action === "removeRepost";
 
-    if (!target) {
-      if (alreadyDone) return { changed: false };
+    const buttonLabels = isRepost ? BUTTON_LABELS.repost : BUTTON_LABELS[action];
+    const button = await firstVisible(buttonByLabels(scope, buttonLabels), 3_000);
+
+    if (!button) {
+      // Для лайка отсутствие кнопки может значить, что дело уже сделано.
+      if (!isRepost) {
+        const oppositeLabels = action === "like" ? BUTTON_LABELS.unlike : BUTTON_LABELS.like;
+        if (await firstVisible(buttonByLabels(scope, oppositeLabels), 3_000)) return { changed: false };
+      }
       return selectorMiss(page, action, `Не нашёл кнопку «${action}» на странице поста — вероятно, Threads изменил вёрстку`);
     }
 
-    await target.click();
+    await button.click();
     await page.waitForTimeout(1_200);
 
-    // Репост требует подтверждения в выпадающем меню.
-    if (action === "repost" || action === "removeRepost") {
-      const confirm = await firstVisible(
-        buttonByLabels(page, action === "repost" ? BUTTON_LABELS.confirmRepost : BUTTON_LABELS.removeRepost),
-        4_000,
-      );
-      await confirm?.click().catch(() => undefined);
-      await page.waitForTimeout(1_000);
+    if (!isRepost) {
+      await humanDelay();
+      return { changed: true };
     }
 
+    // Пункт меню — именно menuitem, а не кнопка: среди кнопок поиск нашёл бы ту
+    // же кнопку репоста под постом, повторный клик закрыл бы меню, и действие
+    // молча не произошло бы при ответе «готово».
+    const wanted = action === "repost" ? BUTTON_LABELS.confirmRepost : BUTTON_LABELS.removeRepost;
+    const opposite = action === "repost" ? BUTTON_LABELS.removeRepost : BUTTON_LABELS.confirmRepost;
+
+    // Меню рисуется не мгновенно, а «пункта нет» и «пункт ещё не появился»
+    // снаружи неразличимы, поэтому ждём его заметно дольше клика. Первый клик
+    // по холодной странице к тому же случается раньше, чем Threads навешивает
+    // обработчик, и меню не открывается вовсе — поэтому вторая попытка.
+    let confirm = await firstVisible(byLabels(page, "menuitem", wanted), 8_000);
+    let alreadyDone = confirm ? null : await firstVisible(byLabels(page, "menuitem", opposite), 2_000);
+
+    if (!confirm && !alreadyDone) {
+      await button.click();
+      await page.waitForTimeout(1_500);
+      confirm = await firstVisible(byLabels(page, "menuitem", wanted), 8_000);
+      alreadyDone = confirm ? null : await firstVisible(byLabels(page, "menuitem", opposite), 4_000);
+    }
+
+    if (!confirm) {
+      await page.keyboard.press("Escape").catch(() => undefined);
+      if (alreadyDone) return { changed: false };
+      return selectorMiss(page, action, `Меню репоста открылось, но нужного пункта в нём нет — вероятно, Threads изменил вёрстку`);
+    }
+
+    await confirm.click();
+    await page.waitForTimeout(1_000);
     await humanDelay();
     return { changed: true };
   });

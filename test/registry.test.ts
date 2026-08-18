@@ -24,6 +24,7 @@ vi.mock("../src/browser/actions.js", () => ({
   removeRepost: vi.fn(async () => ({ changed: true })),
   readFeed: vi.fn(async () => [{ author: "someone", url: null, text: "пост" }]),
   readProfile: vi.fn(async () => ({ username: "someone", posts: [] })),
+  readReplies: vi.fn(async () => ({ url: "https://www.threads.net/@someone/post/abc", post: null, replies: [] })),
 }));
 
 vi.mock("../src/browser/session.js", () => ({
@@ -66,6 +67,13 @@ describe("маршрутизация действий", () => {
 
     expect(browser.likePost).toHaveBeenCalledWith({ url: "https://www.threads.net/@someone/post/abc" });
     expect(graph.publish).not.toHaveBeenCalled();
+  });
+
+  it("комментарии под чужим постом читает браузером, а не Graph", async () => {
+    await execute("read_replies", { url: "https://www.threads.net/@someone/post/abc" });
+
+    expect(browser.readReplies).toHaveBeenCalledWith("https://www.threads.net/@someone/post/abc", 20);
+    expect(graph.getConversation).not.toHaveBeenCalled();
   });
 
   it("определяет тип медиа по переданному URL", async () => {

@@ -141,7 +141,9 @@ export const actions = {
 
   get_conversation: define({
     name: "get_conversation",
-    description: "Получить все ответы под моим постом плоским списком — удобно, чтобы отвечать на комментарии.",
+    description:
+      "Получить все ответы под моим постом плоским списком — удобно, чтобы отвечать на комментарии. " +
+      "Работает только со своими постами: для чужих есть read_replies.",
     driver: "graph",
     input: z.object({
       media_id: z.string().min(1),
@@ -252,6 +254,18 @@ export const actions = {
     driver: "browser",
     input: z.object({ limit: z.number().int().min(1).max(100).default(20) }),
     run: (input) => browser.readFeed(input.limit),
+  }),
+
+  read_replies: define({
+    name: "read_replies",
+    description:
+      "Прочитать комментарии под постом по ссылке — в том числе под чужим. Выполняется через браузер, ответы отдаются плоским списком.",
+    driver: "browser",
+    input: z.object({
+      url: postUrl,
+      limit: z.number().int().min(1).max(100).default(20),
+    }),
+    run: (input) => browser.readReplies(input.url, input.limit),
   }),
 
   read_profile: define({

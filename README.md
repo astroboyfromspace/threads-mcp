@@ -1,10 +1,10 @@
 # Threads как API
 
 Личный сервис на VPS, дающий агенту программный доступ к одному аккаунту Threads:
-публикация, ответы, лайки, подписки, репосты, чтение ленты и профилей.
+публикация, ответы, лайки, подписки, репосты, чтение ленты, профилей и комментариев.
 
 Публикация и ответы идут через официальный Threads API — стабильно и в рамках правил.
-Лайки, подписки и лента официальным API не покрыты, поэтому выполняются браузером
+Лайки, подписки, лента и комментарии под чужими постами официальным API не покрыты, поэтому выполняются браузером
 с сохранённой сессией. Какой путь выбрать, решает сервис; агент просто зовёт действие.
 
 ## Что нужно до начала
@@ -100,6 +100,11 @@ curl -X POST https://<домен>/post \
 curl -X POST https://<домен>/actions/reply_to_post \
   -H "Authorization: Bearer $API_TOKEN" -H "content-type: application/json" \
   -d '{"reply_to_id": "<media-id>", "text": "спасибо!"}'
+
+# Комментарии под постом — своим или чужим
+curl -X POST https://<домен>/actions/read_replies \
+  -H "Authorization: Bearer $API_TOKEN" -H "content-type: application/json" \
+  -d '{"url": "https://www.threads.net/@someone/post/abc"}'
 
 # Лайк
 curl -X POST https://<домен>/actions/like_post \
@@ -197,7 +202,7 @@ Meta и может привести к блокировке аккаунта. П
 
 ```bash
 npm install
-npm test          # 63 теста, живой аккаунт не нужен
+npm test          # 64 теста, живой аккаунт не нужен
 npm run typecheck
 npm run dev
 ```

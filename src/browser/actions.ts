@@ -203,6 +203,100 @@ export async function readProfile(username: string, limit = 20): Promise<{ usern
   });
 }
 
+export type ReplyItem = FeedItem & { hidden: boolean };
+
+export type ThreadView = {
+  url: string;
+  post: FeedItem | null;
+  replies: ReplyItem[];
+};
+
+/**
+ * Читает ответы под постом — в том числе под чужим.
+ *
+ * Официальный API отдаёт беседу только под своими постами, поэтому чужие
+ * комментарии доступны единственным способом: открыть страницу поста браузером.
+ * Список плоский: ответы на ответы Threads показывает тем же контейнером, и
+ * восстановить вложенность по вёрстке нечем.
+ */
+export async function readReplies(postUrl: string, limit = 20): Promise<ThreadView> {
+  return session.withPage(async (page) => {
+    await open(page, postUrl);
+
+    const shortcode = /\/post\/([^/?#]+)/.exec(postUrl)?.[1] ?? null;
+    const url = page.url();
+    const { post, replies } = await collectReplies(page, shortcode, limit, false);
+
+    // Часть ответов Threads прячет как подозрительные и показывает отдельной
+    // страницей. Под чужими постами так уходит большинство комментариев: агент,
+    // спросивший «что ответили», без них увидел бы пустоту вместо ответов.
+    const hiddenHref =
+      replies.length < limit
+        ? await page.locator('a[href*="hidden_replies"]').first().getAttribute("href").catch(() => null)
+        : null;
+
+    if (hiddenHref) {
+      await open(page, new URL(hiddenHref, URLS.home).toString());
+      const hidden = await collectReplies(page, shortcode, limit - replies.length, true);
+      replies.push(...hidden.replies);
+    }
+
+    // Пост без комментариев — нормальный ответ, а не ошибка. Ошибка — когда со
+    // страницы не удалось прочитать вообще ничего, включая сам пост.
+    if (!post && replies.length === 0) {
+      await assertStillLoggedIn(page);
+      return selectorMiss(page, "replies", "Не нашёл на странице ни поста, ни ответов — вероятно, Threads изменил вёрстку");
+    }
+
+    return { url, post, replies };
+  });
+}
+
+/** Собирает со страницы поста сам пост и ответы под ним, подгружая их скроллом. */
+async function collectReplies(
+  page: Page,
+  shortcode: string | null,
+  limit: number,
+  hidden: boolean,
+): Promise<{ post: FeedItem | null; replies: ReplyItem[] }> {
+  const collected = new Map<string, ReplyItem>();
+  let post: FeedItem | null = null;
+  let idleRounds = 0;
+
+  while (collected.size < limit && idleRounds < 4) {
+    const before = collected.size;
+
+    const containers = await page.locator(POST_CONTAINER).all();
+    for (const [index, container] of containers.entries()) {
+      if (collected.size >= limit) break;
+
+      const item = await itemFrom(container);
+      if (!item) continue;
+
+      // Сам пост тоже лежит в контейнере поста и в ответы попасть не должен.
+      // Опознаём его по shortcode в ссылке; если пермалинка нет — по положению:
+      // первый контейнер на странице поста и есть пост. На странице скрытых
+      // ответов поста нет вовсе, поэтому там правило по положению не работает.
+      const isPost = shortcode ? Boolean(item.url?.includes(`/post/${shortcode}`)) : !hidden && index === 0;
+      if (isPost) {
+        post ??= item;
+        continue;
+      }
+
+      const key = keyOf(item);
+      if (collected.has(key)) continue;
+      collected.set(key, { ...item, hidden });
+    }
+
+    if (collected.size === before) idleRounds += 1;
+    else idleRounds = 0;
+
+    if (collected.size < limit) await scrollDown(page);
+  }
+
+  return { post, replies: [...collected.values()] };
+}
+
 async function collectPosts(page: Page, limit: number, label: string): Promise<FeedItem[]> {
   const seen = new Map<string, FeedItem>();
   let idleRounds = 0;
@@ -216,37 +310,53 @@ async function collectPosts(page: Page, limit: number, label: string): Promise<F
     for (const container of containers) {
       if (seen.size >= limit) break;
 
-      const link = container.locator(POST_PERMALINK).first();
-      const href = await link.getAttribute("href").catch(() => null);
-      const text = (await container.innerText().catch(() => "")).trim();
-      if (!text) continue;
+      const item = await itemFrom(container);
+      if (!item) continue;
 
-      const url = href ? new URL(href, URLS.home).toString() : null;
-      const key = url ?? text.slice(0, 120);
+      const key = keyOf(item);
       if (seen.has(key)) continue;
-
-      seen.set(key, { author: authorFromUrl(url), url, text });
+      seen.set(key, item);
     }
 
     if (seen.size === before) idleRounds += 1;
     else idleRounds = 0;
 
-    if (seen.size < limit) {
-      await page.mouse.wheel(0, 2_000);
-      await page.waitForTimeout(1_200);
-    }
+    if (seen.size < limit) await scrollDown(page);
   }
 
   if (seen.size === 0) {
-    const body = await page.locator("body").innerText().catch(() => "");
-    if (LOGGED_OUT_HINTS.some((hint) => hint.test(body.slice(0, 2_000)))) {
-      session.markLoggedOut();
-      throw new ActionError("NEEDS_LOGIN", "Threads показывает страницу для незалогиненных", { retryable: false });
-    }
+    await assertStillLoggedIn(page);
     return selectorMiss(page, label, "Не нашёл ни одного поста — вероятно, Threads изменил вёрстку");
   }
 
   return [...seen.values()];
+}
+
+/** Достаёт из контейнера то, что нам нужно от поста; null — если контейнер пустой. */
+async function itemFrom(container: Locator): Promise<FeedItem | null> {
+  const href = await container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null);
+  const text = (await container.innerText().catch(() => "")).trim();
+  if (!text) return null;
+
+  const url = href ? new URL(href, URLS.home).toString() : null;
+  return { author: authorFromUrl(url), url, text };
+}
+
+/** Ключ для отсева повторов: ответ может быть и без пермалинка, тогда опознаём по тексту. */
+const keyOf = (item: FeedItem) => item.url ?? item.text.slice(0, 120);
+
+async function scrollDown(page: Page): Promise<void> {
+  await page.mouse.wheel(0, 2_000);
+  await page.waitForTimeout(1_200);
+}
+
+/** Пустая выдача бывает и от того, что нас разлогинило, — это другая ошибка, чем сломанный селектор. */
+async function assertStillLoggedIn(page: Page): Promise<void> {
+  const body = await page.locator("body").innerText().catch(() => "");
+  if (LOGGED_OUT_HINTS.some((hint) => hint.test(body.slice(0, 2_000)))) {
+    session.markLoggedOut();
+    throw new ActionError("NEEDS_LOGIN", "Threads показывает страницу для незалогиненных", { retryable: false });
+  }
 }
 
 function authorFromUrl(url: string | null): string | null {

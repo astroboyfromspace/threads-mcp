@@ -1,7 +1,7 @@
 # Образ Playwright уже содержит Chromium и все системные библиотеки к нему —
 # собирать их вручную дольше и ошибочнее. Версия обязана совпадать с playwright
 # из package.json, иначе браузер и драйвер разойдутся.
-FROM mcr.microsoft.com/playwright:v1.50.0-noble
+FROM mcr.microsoft.com/playwright:v1.62.1-noble
 
 ENV NODE_ENV=production \
     DATA_DIR=/var/lib/threads-api

@@ -20,7 +20,9 @@ apt-get install -y -qq xvfb x11vnc fluxbox novnc websockify >/dev/null
 mkdir -p "${PROFILE_DIR}"
 
 echo "Запускаю X-сервер на ${DISPLAY}…"
-Xvfb "${DISPLAY}" -screen 0 "${SCREEN}" &
+# -ac: X поднимает root, а Chromium ниже работает от pwuser — без этого флага
+# X не пустит его на дисплей. Наружу дисплей не торчит, сеть только докерная.
+Xvfb "${DISPLAY}" -screen 0 "${SCREEN}" -ac &
 sleep 2
 
 fluxbox >/dev/null 2>&1 &
@@ -41,8 +43,17 @@ echo "Профиль: ${PROFILE_DIR}"
 echo "Закончишь — Ctrl+C здесь, затем POST /browser/resume."
 echo
 
-/ms-playwright/chromium-*/chrome-linux/chrome \
+# Chromium — от pwuser, того же пользователя, под которым профиль читает
+# контейнер api: файлы, созданные root, сервис потом открыть не сможет.
+# Заодно root-запуск Chromium вообще не стартует без песочницы.
+# --no-sandbox: в контейнере нет прав на user namespaces, песочница не заводится;
+# сеанс одноразовый и нужен только для страницы логина Threads.
+chown -R pwuser:pwuser "${PROFILE_DIR}"
+CHROME=(/ms-playwright/chromium-*/chrome-linux/chrome)
+runuser -u pwuser -- env HOME=/home/pwuser DISPLAY="${DISPLAY}" \
+  "${CHROME[0]}" \
   --user-data-dir="${PROFILE_DIR}" \
+  --no-sandbox \
   --no-first-run \
   --no-default-browser-check \
   --disable-blink-features=AutomationControlled \

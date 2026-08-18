@@ -26,8 +26,20 @@ if [[ -z "${DOMAIN}" || "${DOMAIN}" == "example.com" ]]; then
   exit 1
 fi
 
+# Директива `http2 on;` существует только с nginx 1.25.1. На более старых
+# сборках (например, 1.24 из Ubuntu 24.04) http2 включается флагом в `listen`,
+# а незнакомая директива роняет весь nginx, включая соседние сайты.
+NGINX_VERSION="$(nginx -v 2>&1 | sed -n 's#.*nginx/\([0-9.]*\).*#\1#p')"
+if [[ -n "${NGINX_VERSION}" ]] \
+  && [[ "$(printf '%s\n' "1.25.1" "${NGINX_VERSION}" | sort -V | head -n1)" == "1.25.1" ]]; then
+  LISTEN_443="    listen 443 ssl;\\n    listen [::]:443 ssl;\\n    http2 on;"
+else
+  LISTEN_443="    listen 443 ssl http2;\\n    listen [::]:443 ssl http2;"
+fi
+
 TEMPLATE="deploy/nginx/threads-api.conf.template"
 rendered="$(sed \
+  -e "s#__LISTEN_443__#${LISTEN_443}#g" \
   -e "s#__DOMAIN__#${DOMAIN}#g" \
   -e "s#__API_PORT__#${API_PORT}#g" \
   -e "s#__NOVNC_PORT__#${NOVNC_PORT}#g" \

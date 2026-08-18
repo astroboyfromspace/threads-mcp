@@ -10,7 +10,10 @@ WORKDIR /app
 
 # Зависимости отдельным слоем: пересобираются только при изменении манифестов.
 COPY package.json package-lock.json ./
-RUN npm ci
+# --include=dev обязателен: выше задан NODE_ENV=production, из-за него npm сам
+# подставляет omit=dev и не ставит typescript, а без tsc падает сборка ниже.
+# На размер образа это не влияет — devDependencies отбрасывает npm prune.
+RUN npm ci --include=dev
 
 COPY tsconfig.json ./
 COPY src ./src

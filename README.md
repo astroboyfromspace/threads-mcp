@@ -230,7 +230,7 @@ Meta и может привести к блокировке аккаунта. П
 
 ```bash
 npm install
-npm test          # 64 теста, живой аккаунт не нужен
+npm test          # 105 тестов, живой аккаунт не нужен
 npm run typecheck
 npm run dev
 ```

@@ -22,6 +22,7 @@ export type CollectDb = {
   nextQueries(count: number): string[];
   insertPosts(posts: CollectedPost[], at: number): number;
   recordRun(word: string, result: { newPosts?: number; error?: string }, at: number): void;
+  recordError(word: string, error: string, at: number): void;
   lastError(word: string): string | null;
   totalPosts(): number;
   allPosts(): CollectedPost[];
@@ -112,6 +113,13 @@ export function openCollectDb(path: string): CollectDb {
             SET last_run_at = ?, runs = runs + 1, last_new = ?, last_error = ?
           WHERE text = ?`,
       ).run(at, result.newPosts ?? null, result.error ?? null, word);
+    },
+
+    // Ошибка сама по себе не значит, что слово честно отработано: не трогаем
+    // last_run_at и runs, иначе слово уедет в конец очереди ротации, ничего не
+    // собрав, — а неверный токен одним заходом сожжёт ротацию целиком.
+    recordError(word, error) {
+      db.prepare(`UPDATE query SET last_error = ? WHERE text = ?`).run(error, word);
     },
 
     lastError(word) {

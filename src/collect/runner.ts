@@ -18,7 +18,7 @@ export type CollectionReport = {
   newPosts: number;
   queriesUsed: number;
   errors: number;
-  stoppedBy: "target_reached" | "queries_exhausted" | "NEEDS_LOGIN" | "SELECTOR_MISS";
+  stoppedBy: "target_reached" | "queries_exhausted" | "NEEDS_LOGIN" | "SELECTOR_MISS" | "too_many_errors";
 };
 
 type Deps = {
@@ -34,8 +34,48 @@ type Options = { target: number; limit: number };
 /** Ошибки, после которых продолжать бессмысленно: обе означают сломанный сбор, а не неудачное слово. */
 const FATAL = new Set(["NEEDS_LOGIN", "SELECTOR_MISS"]);
 
+/** Подряд идущих неудачных слов, после которых прогон явно не в порядке — например, токен неверный. */
+const MAX_CONSECUTIVE_ERRORS = 5;
+
+/** Растущая пауза перед повтором RATE_LIMITED: используется, если сервис не прислал свой retry_after. */
+const RATE_LIMIT_PAUSES_MS = [60_000, 180_000, 600_000];
+
 const codeOf = (error: unknown): string =>
   typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "INTERNAL";
+
+/** Сервис может прислать свою рекомендованную паузу в секундах — она приоритетнее нашей. */
+const retryAfterOf = (error: unknown): number | undefined => {
+  if (typeof error !== "object" || error === null || !("retry_after" in error)) return undefined;
+  const value = (error as { retry_after: unknown }).retry_after;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+};
+
+/**
+ * Зовёт поиск с повтором на RATE_LIMITED: до трёх повторов сверх исходного
+ * захода, с растущей паузой 60/180/600 секунд — или с паузой из retry_after
+ * ответа, если сервис её прислал. После исчерпания повторов бросает
+ * последнюю ошибку — слово считается неудачным по общим правилам.
+ */
+async function searchWithRetry(
+  client: ThreadsClient,
+  word: string,
+  limit: number,
+  sleep: (ms: number) => Promise<void>,
+  log: (message: string) => void,
+): Promise<{ query: string; posts: PostCardDto[] }> {
+  for (let retry = 0; ; retry += 1) {
+    try {
+      return await client.searchPosts(word, limit);
+    } catch (error) {
+      if (codeOf(error) !== "RATE_LIMITED" || retry >= RATE_LIMIT_PAUSES_MS.length) throw error;
+
+      const retryAfterSeconds = retryAfterOf(error);
+      const pauseMs = retryAfterSeconds !== undefined ? retryAfterSeconds * 1_000 : RATE_LIMIT_PAUSES_MS[retry]!;
+      log(`${word}: RATE_LIMITED, повтор через ${Math.round(pauseMs / 1_000)}с`);
+      await sleep(pauseMs);
+    }
+  }
+}
 
 /**
  * Ссылки в выдаче Threads несут трекинговые параметры (`?xmt=…`, `igshid=…` и
@@ -92,9 +132,14 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
   // должен, иначе одно и то же слово может попасться дважды.
   const words = db.nextQueries(1_000);
 
+  // Подряд идущих неудачных слов: успешный заход обнуляет счётчик. Неверный
+  // токен иначе сжигает всю ротацию — 82 слова получают свежий last_run_at и
+  // ноль постов, — поэтому прерываемся раньше.
+  let consecutiveErrors = 0;
+
   for (const [index, word] of words.entries()) {
     try {
-      const found = await client.searchPosts(word, options.limit);
+      const found = await searchWithRetry(client, word, options.limit, sleep, log);
       const stored = found.posts
         .map((card) => toStored(card, "search", word))
         .filter((post): post is CollectedPost => post !== null);
@@ -102,6 +147,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
       const added = db.insertPosts(stored, now());
       newPosts += added;
       queriesUsed += 1;
+      consecutiveErrors = 0;
       db.recordRun(word, { newPosts: added }, now());
       log(`${word}: +${added} (всего ${newPosts})`);
     } catch (error) {
@@ -111,8 +157,15 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
       }
       errors += 1;
       queriesUsed += 1;
-      db.recordRun(word, { error: code }, now());
+      consecutiveErrors += 1;
+      // Не recordRun: last_run_at и runs остаются как были, иначе неудачное
+      // слово уедет в конец очереди ротации, ничего не собрав.
+      db.recordError(word, code, now());
       log(`${word}: ошибка ${code}`);
+
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        return { newPosts, queriesUsed, errors, stoppedBy: "too_many_errors" };
+      }
     }
 
     if (newPosts >= options.target) {

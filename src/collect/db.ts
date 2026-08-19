@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { MediaKind } from "../browser/cards.js";
+import type { Lang, MediaKind } from "../browser/cards.js";
 
 export type CollectedPost = {
   url: string;
@@ -13,6 +13,7 @@ export type CollectedPost = {
   reposts: number | null;
   media: MediaKind | null;
   mediaCount: number | null;
+  lang: Lang | null;
   source: "search" | "feed";
   foundBy: string | null;
 };
@@ -54,6 +55,7 @@ export function openCollectDb(path: string): CollectDb {
       reposts      INTEGER,
       media        TEXT,
       media_count  INTEGER,
+      lang         TEXT,
       source       TEXT NOT NULL,
       found_by     TEXT,
       collected_at INTEGER NOT NULL
@@ -68,11 +70,21 @@ export function openCollectDb(path: string): CollectDb {
     );
   `);
 
+  // CREATE TABLE IF NOT EXISTS новую колонку в уже существующей на диске базе
+  // не добавит — владелец мог собирать датасет до появления lang. Дочиняем
+  // схему сами: смотрим через PRAGMA table_info, есть ли колонка, и добавляем
+  // её через ALTER TABLE, если нет. На новой базе колонка уже создана выше, и
+  // это просто ничего не делает.
+  const columns = db.prepare(`PRAGMA table_info(post)`).all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "lang")) {
+    db.exec(`ALTER TABLE post ADD COLUMN lang TEXT`);
+  }
+
   const insertPost = db.prepare(`
     INSERT OR IGNORE INTO post
-      (url, author, text, published_at, likes, replies, reposts, media, media_count, source, found_by, collected_at)
+      (url, author, text, published_at, likes, replies, reposts, media, media_count, lang, source, found_by, collected_at)
     VALUES
-      (@url, @author, @text, @publishedAt, @likes, @replies, @reposts, @media, @mediaCount, @source, @foundBy, @collectedAt)
+      (@url, @author, @text, @publishedAt, @likes, @replies, @reposts, @media, @mediaCount, @lang, @source, @foundBy, @collectedAt)
   `);
 
   const insertMany = db.transaction((posts: CollectedPost[], at: number) => {
@@ -153,6 +165,7 @@ export function openCollectDb(path: string): CollectDb {
         reposts: row.reposts as number | null,
         media: row.media as MediaKind | null,
         mediaCount: row.media_count as number | null,
+        lang: row.lang as Lang | null,
         source: row.source as "search" | "feed",
         foundBy: row.found_by as string | null,
       }));

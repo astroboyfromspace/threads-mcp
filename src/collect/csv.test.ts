@@ -12,6 +12,7 @@ const base: CollectedPost = {
   reposts: 0,
   media: "image",
   mediaCount: 2,
+  lang: "ru",
   source: "search",
   foundBy: "today",
 };
@@ -19,7 +20,7 @@ const base: CollectedPost = {
 describe("toCsv", () => {
   it("ставит заголовок первой строкой", () => {
     expect(toCsv([]).trim()).toBe(
-      "url,author,published_at,likes,replies,reposts,media,media_count,source,found_by,text",
+      "url,author,published_at,likes,replies,reposts,media,media_count,lang,source,found_by,text",
     );
   });
 
@@ -28,7 +29,7 @@ describe("toCsv", () => {
 
     expect(lines).toHaveLength(2);
     expect(lines[1]).toBe(
-      '"https://t/1","someone","2026-08-18T10:00:00.000Z",5,1,0,"image",2,"search","today","привет"',
+      '"https://t/1","someone","2026-08-18T10:00:00.000Z",5,1,0,"image",2,"ru","search","today","привет"',
     );
   });
 
@@ -41,9 +42,11 @@ describe("toCsv", () => {
   });
 
   it("пустые значения оставляет пустыми, а не строкой null", () => {
-    const csv = toCsv([{ ...base, author: null, likes: null, media: null, mediaCount: null, foundBy: null }]);
+    const csv = toCsv([
+      { ...base, author: null, likes: null, media: null, mediaCount: null, lang: null, foundBy: null },
+    ]);
     const row = csv.trim().split("\n")[1]!;
 
-    expect(row).toBe('"https://t/1",,"2026-08-18T10:00:00.000Z",,1,0,,,"search",,"привет"');
+    expect(row).toBe('"https://t/1",,"2026-08-18T10:00:00.000Z",,1,0,,,,"search",,"привет"');
   });
 });

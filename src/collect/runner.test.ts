@@ -16,6 +16,7 @@ function card(url: string) {
     reposts: 0,
     media: "none" as const,
     mediaCount: 0,
+    lang: "en" as const,
   };
 }
 

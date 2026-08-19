@@ -1,3 +1,4 @@
+import Database from "better-sqlite3";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,7 @@ function post(url: string, extra: Partial<CollectedPost> = {}): CollectedPost {
     reposts: 0,
     media: "none",
     mediaCount: 0,
+    lang: "ru",
     source: "search",
     foundBy: "today",
     ...extra,
@@ -59,6 +61,76 @@ describe("посты", () => {
     expect(stored.media).toBeNull();
     expect(stored.mediaCount).toBeNull();
     expect(stored.likes).toBeNull();
+  });
+
+  it("сохраняет метку языка", () => {
+    db.insertPosts([post("https://t/1", { lang: "other" })], 1000);
+
+    expect(db.allPosts()[0]!.lang).toBe("other");
+  });
+});
+
+describe("схема существующей базы", () => {
+  // var/collect.sqlite у владельца мог быть создан до появления lang —
+  // CREATE TABLE IF NOT EXISTS новую колонку в него не добавит. Открытие
+  // существующей базы должно дочинить схему через ALTER TABLE, не потеряв
+  // уже собранные данные.
+  it("дочиняет колонку lang в базе, созданной до её появления, и не теряет данные", () => {
+    const dir = mkdtempSync(join(tmpdir(), "collect-migrate-"));
+    const path = join(dir, "collect.sqlite");
+
+    // Имитируем старую базу: та же схема post, но без колонки lang.
+    const legacy = new Database(path);
+    legacy.exec(`
+      CREATE TABLE post (
+        url          TEXT PRIMARY KEY,
+        author       TEXT,
+        text         TEXT NOT NULL,
+        published_at TEXT,
+        likes        INTEGER,
+        replies      INTEGER,
+        reposts      INTEGER,
+        media        TEXT,
+        media_count  INTEGER,
+        source       TEXT NOT NULL,
+        found_by     TEXT,
+        collected_at INTEGER NOT NULL
+      );
+      CREATE TABLE query (
+        text        TEXT PRIMARY KEY,
+        last_run_at INTEGER,
+        runs        INTEGER NOT NULL DEFAULT 0,
+        last_new    INTEGER,
+        last_error  TEXT
+      );
+    `);
+    legacy
+      .prepare(
+        `INSERT INTO post (url, author, text, published_at, likes, replies, reposts, media, media_count, source, found_by, collected_at)
+         VALUES ('https://t/old', 'someone', 'старый пост', NULL, 1, 0, 0, 'none', 0, 'search', 'today', 500)`,
+      )
+      .run();
+    legacy.close();
+
+    // Открываем через openCollectDb — она должна дочинить схему.
+    const opened = openCollectDb(path);
+    const columns = new Database(path).pragma(`table_info(post)`) as Array<{ name: string }>;
+    expect(columns.some((column) => column.name === "lang")).toBe(true);
+
+    const stored = opened.allPosts()[0]!;
+    expect(stored.url).toBe("https://t/old");
+    expect(stored.text).toBe("старый пост");
+    expect(stored.lang).toBeNull();
+
+    opened.close();
+
+    // Открываем ещё раз, чтобы убедиться: колонка на месте и данные целы
+    // после повторного закрытия/открытия, а не только сразу после миграции.
+    const reopened = openCollectDb(path);
+    const again = reopened.allPosts()[0]!;
+    expect(again.url).toBe("https://t/old");
+    expect(again.text).toBe("старый пост");
+    reopened.close();
   });
 });
 

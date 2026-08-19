@@ -59,6 +59,10 @@ const RATE_LIMIT_PAUSES_MS = [60_000, 180_000, 600_000];
  */
 const RATE_LIMIT_PAUSE_CAP_MS = 15 * 60 * 1_000;
 
+/** Сообщение ошибки: без него в логе остаётся голый код, по которому нечего чинить. */
+const messageOf = (error: unknown): string =>
+  error instanceof Error && error.message ? `: ${error.message}` : "";
+
 const codeOf = (error: unknown): string =>
   typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "INTERNAL";
 
@@ -181,7 +185,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
     const code = codeOf(error);
     if (FATAL.has(code)) return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: code as "NEEDS_LOGIN" };
     errors += 1;
-    log(`лента: ошибка ${code}`);
+    log(`лента: ошибка ${code}${messageOf(error)}`);
   }
 
   if (newPosts >= options.target) {
@@ -225,7 +229,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
       // Не recordRun: last_run_at и runs остаются как были, иначе неудачное
       // слово уедет в конец очереди ротации, ничего не собрав.
       db.recordError(word, code, now());
-      log(`${word}: ошибка ${code}`);
+      log(`${word}: ошибка ${code}${messageOf(error)}`);
 
       if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
         return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: "too_many_errors" };

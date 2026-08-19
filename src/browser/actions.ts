@@ -414,9 +414,17 @@ async function collectPosts(page: Page, limit: number, label: string, options: C
  */
 async function itemFrom(container: Locator, href: string | null): Promise<FeedItem | null> {
   const text = await textOf(container);
+  // Карточку не прочитать — пропускаем целиком. Записать её с пустым текстом
+  // значило бы протащить в датасет пост-призрак, который на странице есть, а у
+  // нас без текста.
+  if (text === null) return null;
   if (!text && !href) return null;
 
-  const datetime = await container.locator(POST_TIME).first().getAttribute("datetime").catch(() => null);
+  const datetime = await container
+    .locator(POST_TIME)
+    .first()
+    .getAttribute("datetime", { timeout: CARD_TIMEOUT_MS })
+    .catch(() => null);
 
   return buildCard({
     href,
@@ -431,6 +439,22 @@ async function itemFrom(container: Locator, href: string | null): Promise<FeedIt
 
 /** Возвращается, когда кнопка найдена, но ни текст, ни aria-label числа не несут — законный ноль, а не «не нашли». */
 const FOUND_EMPTY_LABEL = "0";
+
+/**
+ * Потолок ожидания при чтении одной карточки.
+ *
+ * Локаторы карточек привязаны к номеру в списке, а Threads переиспользует
+ * контейнеры при виртуальном скролле: пока мы разбираем десятую карточку, она
+ * может уехать из DOM. По умолчанию Playwright ждёт такой локатор 30 секунд,
+ * и на длинной выдаче это давало запросы по полторы минуты, часть из которых
+ * умирала с «locator.evaluate: Timeout 30000ms exceeded» — одна пропавшая
+ * карточка роняла сбор целиком.
+ *
+ * Две секунды — с запасом на живую отрисовку, но без получасовых зависаний:
+ * карточка, которой уже нет, отсеивается сразу и разбирается заново на
+ * следующем круге скролла, когда список устоится.
+ */
+const CARD_TIMEOUT_MS = 2_000;
 
 /**
  * Подпись первой подходящей кнопки внутри карточки.
@@ -450,10 +474,10 @@ async function labelOf(container: Locator, labels: readonly RegExp[]): Promise<s
   const button = buttonByLabels(container, labels).first();
   if ((await button.count().catch(() => 0)) === 0) return null;
 
-  const text = await button.innerText().catch(() => "");
+  const text = await button.innerText({ timeout: CARD_TIMEOUT_MS }).catch(() => "");
   if (text.trim()) return text;
 
-  const aria = await button.getAttribute("aria-label").catch(() => null);
+  const aria = await button.getAttribute("aria-label", { timeout: CARD_TIMEOUT_MS }).catch(() => null);
   if (aria?.trim()) return aria;
 
   return FOUND_EMPTY_LABEL;
@@ -492,7 +516,7 @@ async function mediaOf(container: Locator): Promise<{ images: number; videos: nu
         .filter((rect): rect is { width: number; height: number } => rect !== null);
 
       return { images: candidates.map(rectOf), videos };
-    }, POST_MEDIA);
+    }, POST_MEDIA, { timeout: CARD_TIMEOUT_MS });
 
     return countMedia(raw.images, raw.videos, { minWidth: POST_MEDIA.minWidth, tolerance: POST_MEDIA.sizeTolerance });
   } catch {
@@ -510,7 +534,7 @@ async function mediaOf(container: Locator): Promise<{ images: number; videos: nu
  * ссылку целиком, он найдёт предка-ссылку и снаружи контейнера. Поэтому
  * поднимаемся вручную и останавливаемся на границе контейнера.
  */
-async function textOf(container: Locator): Promise<string> {
+async function textOf(container: Locator): Promise<string | null> {
   return container.evaluate((el, { spanSelector, excludeSelector }) => {
     // Тот же повод для any, что и в mediaOf выше: DOM-типы недоступны tsc в
     // Node-конфигурации проекта, а сам код выполняется в браузере.
@@ -534,7 +558,11 @@ async function textOf(container: Locator): Promise<string> {
     }
 
     return longest;
-  }, { spanSelector: POST_TEXT_SPAN, excludeSelector: POST_TEXT_EXCLUDE });
+  }, { spanSelector: POST_TEXT_SPAN, excludeSelector: POST_TEXT_EXCLUDE }, { timeout: CARD_TIMEOUT_MS })
+    // null означает «карточку не прочитать», и это не то же самое, что пустой
+    // текст: пост из одного видео законно пуст, а исчезнувшая карточка должна
+    // быть пропущена и разобрана заново на следующем круге скролла.
+    .catch(() => null);
 }
 
 /** Ключ для отсева повторов: ответ может быть и без пермалинка, тогда опознаём по тексту. */

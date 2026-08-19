@@ -233,11 +233,10 @@ git commit -m "Разбор счётчиков и медиа в карточке
 
 - [ ] **Шаг 1: Написать падающий тест**
 
-Дописать в конец `src/browser/cards.test.ts`:
+Дописать в конец `src/browser/cards.test.ts`, а импорт из первой строки файла
+расширить до `import { authorFromUrl, buildCard, classifyMedia, parseCount } from "./cards.js";`:
 
 ```ts
-import { authorFromUrl, buildCard } from "./cards.js";
-
 const RAW = {
   href: "/@someone/post/abc123",
   text: "просто пост",
@@ -474,11 +473,21 @@ async function itemFrom(container: Locator): Promise<FeedItem | null> {
   });
 }
 
-/** Подпись первой подходящей кнопки внутри карточки; null — если такой кнопки нет. */
+/**
+ * Подпись первой подходящей кнопки внутри карточки; null — если такой кнопки нет.
+ *
+ * Доступное имя не обязано лежать в aria-label: Threads рисует счётчик и
+ * текстом внутри кнопки. Поэтому сначала атрибут, а если его нет — содержимое.
+ */
 async function labelOf(container: Locator, labels: readonly RegExp[]): Promise<string | null> {
   const button = buttonByLabels(container, labels).first();
   if ((await button.count().catch(() => 0)) === 0) return null;
-  return button.getAttribute("aria-label").catch(() => null);
+
+  const aria = await button.getAttribute("aria-label").catch(() => null);
+  if (aria?.trim()) return aria;
+
+  const text = await button.innerText().catch(() => "");
+  return text.trim() || null;
 }
 
 /**

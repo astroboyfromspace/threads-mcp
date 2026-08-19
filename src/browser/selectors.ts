@@ -96,4 +96,8 @@ export const POST_MEDIA = {
   video: "video",
   avatarAltPattern: "profile picture|фото профиля",
   minWidth: 100,
+  // У видео поверх самого <video> лежит <img>-превью кадра того же размера —
+  // без этого допуска на дробные пиксели вёрстки такое превью посчиталось бы
+  // отдельной картинкой. Логика сравнения — countMedia() в cards.ts.
+  sizeTolerance: 2,
 } as const;

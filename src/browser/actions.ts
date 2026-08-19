@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import { ActionError } from "../errors.js";
-import { buildCard, type PostCard } from "./cards.js";
+import { buildCard, countMedia, type PostCard } from "./cards.js";
 import {
   BUTTON_LABELS,
   LOGGED_OUT_HINTS,
@@ -460,36 +460,41 @@ async function labelOf(container: Locator, labels: readonly RegExp[]): Promise<s
 }
 
 /**
- * Считает медиа внутри карточки по подписи и отрисованному размеру картинок —
- * см. POST_MEDIA в selectors.ts за объяснением, почему не по положению в
- * вёрстке. Выполняется одним evaluate: правило завязано на geometry
- * (getBoundingClientRect), а её нельзя получить локатором без похода в
- * браузер за каждой картинкой отдельно.
+ * Снимает с карточки сырые прямоугольники картинок и видео и отдаёт их в
+ * countMedia() (cards.ts) — чистую функцию, которую можно проверить тестами
+ * без браузера. Здесь, в браузерном слое, только сбор: подпись и геометрия
+ * (getBoundingClientRect) недоступны локатором без похода в браузер за
+ * каждой картинкой отдельно, поэтому — один evaluate.
  *
- * null — только если среди подходящих по подписи картинок ни у одной не
- * удалось получить размер (нулевой или отсутствующий — так бывает у ещё не
- * отрисованных лениво картинок). Выдуманный ноль в этом случае хуже честного
- * «не знаю»: он молча соврёт в датасет.
+ * Картинка-кандидат — та, чей alt не похож на подпись аватара (см.
+ * POST_MEDIA.avatarAltPattern). Для каждой такой картинки берём прямоугольник
+ * или null, если размер получить не удалось (ширина 0 — так бывает у ещё не
+ * отрисованных лениво картинок); дальше решение за countMedia().
  */
 async function mediaOf(container: Locator): Promise<{ images: number; videos: number } | null> {
   try {
-    return await container.evaluate((el, { image, video, avatarAltPattern, minWidth }) => {
+    const raw = await container.evaluate((el, { image, video, avatarAltPattern }) => {
       const avatarAlt = new RegExp(avatarAltPattern, "i");
-      const videos = el.querySelectorAll(video).length;
 
       // Проект собирается без lib "dom" (Node-код), поэтому DOM-типы внутри
       // browser-колбэка не видны tsc — приводим через any, код всё равно
       // выполняется в браузере Playwright, а не проверяется здесь по типам.
+      const rectOf = (node: any): { width: number; height: number } | null => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 ? { width: rect.width, height: rect.height } : null;
+      };
+
       const imgs = Array.from(el.querySelectorAll(image)) as any[];
       const candidates = imgs.filter((img) => !avatarAlt.test(img.alt || ""));
-      if (candidates.length === 0) return { images: 0, videos };
 
-      const withSize = candidates.filter((img) => img.getBoundingClientRect().width > 0);
-      if (withSize.length === 0) return null;
+      const videos = (Array.from(el.querySelectorAll(video)) as any[])
+        .map(rectOf)
+        .filter((rect): rect is { width: number; height: number } => rect !== null);
 
-      const images = withSize.filter((img) => img.getBoundingClientRect().width >= minWidth).length;
-      return { images, videos };
+      return { images: candidates.map(rectOf), videos };
     }, POST_MEDIA);
+
+    return countMedia(raw.images, raw.videos, { minWidth: POST_MEDIA.minWidth, tolerance: POST_MEDIA.sizeTolerance });
   } catch {
     return null;
   }

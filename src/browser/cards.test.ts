@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authorFromUrl, buildCard, classifyMedia, parseCount } from "./cards.js";
+import { authorFromUrl, buildCard, classifyMedia, countMedia, parseCount } from "./cards.js";
 
 describe("parseCount", () => {
   it("читает голое число", () => {
@@ -64,6 +64,52 @@ describe("classifyMedia", () => {
   // Если отличить медиа поста от аватара не удалось, честный ответ — «не знаю».
   it("неопознанная карточка — null, а не none", () => {
     expect(classifyMedia(null)).toEqual({ media: null, mediaCount: null });
+  });
+});
+
+describe("countMedia", () => {
+  // Видео на живой странице рисуется вместе с <img>-кадром того же размера
+  // поверх него — без исключения превью ролик задваивался бы в mediaCount.
+  it("ролик с превью того же размера — video, а не mixed", () => {
+    expect(countMedia([{ width: 242, height: 430 }], [{ width: 242, height: 430 }])).toEqual({
+      images: 0,
+      videos: 1,
+    });
+  });
+
+  // Вёрстка отдаёт дробные значения — сравнение с допуском в пару пикселей,
+  // а не побайтовое.
+  it("совпадение размеров с допуском на дробные пиксели", () => {
+    expect(countMedia([{ width: 241.6, height: 429.3 }], [{ width: 242, height: 430 }])).toEqual({
+      images: 0,
+      videos: 1,
+    });
+  });
+
+  it("одна картинка без видео", () => {
+    expect(countMedia([{ width: 500, height: 600 }], [])).toEqual({ images: 1, videos: 0 });
+  });
+
+  // Ролик и отдельная картинка другого размера — законный mixed, превью тут ни при чём.
+  it("ролик плюс отдельная картинка другого размера — законный mixed", () => {
+    expect(countMedia([{ width: 500, height: 600 }], [{ width: 242, height: 430 }])).toEqual({
+      images: 1,
+      videos: 1,
+    });
+  });
+
+  it("ничего — не медиа-кандидатов, не видео", () => {
+    expect(countMedia([], [])).toEqual({ images: 0, videos: 0 });
+  });
+
+  // Картинки нашлись, но размер не удалось получить ни у одной — честное «не знаю».
+  it("картинки без размеров — null, а не ноль", () => {
+    expect(countMedia([null], [])).toBeNull();
+  });
+
+  // Картинка меньше порога (не аватар по alt, но всё равно мелкая иконка) в счёт не идёт.
+  it("картинка меньше minWidth не считается", () => {
+    expect(countMedia([{ width: 40, height: 40 }], [])).toEqual({ images: 0, videos: 0 });
   });
 });
 

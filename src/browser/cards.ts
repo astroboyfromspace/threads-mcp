@@ -61,6 +61,48 @@ export function classifyMedia(counts: { images: number; videos: number } | null)
   return { media: "none", mediaCount: 0 };
 }
 
+/** Отрисованный прямоугольник элемента — то, что реально видно на странице. */
+export type MediaRect = { width: number; height: number };
+
+/**
+ * Считает картинки и видео карточки по их отрисованным прямоугольникам.
+ *
+ * Threads рисует у видео два наложенных элемента одного размера: сам
+ * <video> и <img> с кадром-превью поверх него. Без исключения превью каждый
+ * ролик считался бы ещё и картинкой — mediaCount задваивался, а пост с одним
+ * роликом приезжал как media "mixed" вместо "video" (на карусели то же самое
+ * умножало mediaCount на пары «кадр + ролик» на каждом слайде). Правило:
+ * картинка, чей прямоугольник совпадает с прямоугольником какого-либо видео
+ * из той же карточки, — превью, и в счёт не идёт. Сравниваем с допуском в
+ * пару пикселей, а не побайтово: вёрстка отдаёт дробные значения.
+ *
+ * images со значением null — картинка, у которой не удалось получить размер
+ * (например, ещё не отрисованная лениво картинка). Если размера не удалось
+ * получить ни у одной найденной картинки, честный ответ — null, а не
+ * выдуманный ноль: см. классификацию этого случая в classifyMedia.
+ */
+export function countMedia(
+  images: ReadonlyArray<MediaRect | null>,
+  videos: readonly MediaRect[],
+  { minWidth = 100, tolerance = 2 }: { minWidth?: number; tolerance?: number } = {},
+): { images: number; videos: number } | null {
+  // Картинок-кандидатов нет вовсе — это законный «медиа нет» (или «только
+  // видео»), а не «не смогли определить»: рисовать нечего, а не не удалось
+  // посчитать.
+  if (images.length === 0) return { images: 0, videos: videos.length };
+
+  const withSize = images.filter((img): img is MediaRect => img !== null);
+  if (withSize.length === 0) return null;
+
+  const isVideoPreview = (img: MediaRect) =>
+    videos.some(
+      (video) => Math.abs(img.width - video.width) <= tolerance && Math.abs(img.height - video.height) <= tolerance,
+    );
+
+  const own = withSize.filter((img) => !isVideoPreview(img) && img.width >= minWidth);
+  return { images: own.length, videos: videos.length };
+}
+
 /** Сырьё, снятое со страницы: строки как есть, без интерпретации. */
 export type RawCard = {
   href: string | null;

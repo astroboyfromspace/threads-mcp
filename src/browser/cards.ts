@@ -103,6 +103,61 @@ export function countMedia(
   return { images: own.length, videos: videos.length };
 }
 
+export type Lang = "ru" | "en" | "other";
+
+/**
+ * Хвост-подпись кнопки перевода, которую Threads приклеивает к тексту поста
+ * не на английском: «Тут текст поста<NBSP><NBSP>Translate». Интерфейс
+ * бывает и русским — тогда хвост «…Перевести».
+ *
+ * Перед словом — ровно неразрывные пробелы ( ), а не обычные: это и
+ * отличает служебный хвост от законного «...Translate» в конце обычного
+ * английского предложения, набранного как текст поста, а не приклеенного
+ * Threads. Обычный пробел трогать нельзя.
+ */
+const TRANSLATE_TAIL = / +(Translate|Перевести)$/;
+
+/** Отрезает хвост-подпись кнопки перевода, если он есть. См. TRANSLATE_TAIL. */
+export function stripTranslateTail(text: string): string {
+  return text.replace(TRANSLATE_TAIL, "");
+}
+
+/**
+ * Грубо определяет язык текста поста по алфавиту букв — без лингвистики и
+ * внешних словарей: делить датасет собранных по английским частотным словам
+ * постов на «свои» и «чужие» с точностью до языковой модели тут не нужно и
+ * не заказано, достаточно честной метки.
+ *
+ * Считаем три вида букв: кириллица, латиница, всё остальное (хинди, арабица,
+ * иероглифы и так далее). Цифры, эмодзи, пунктуация и пробелы не считаются
+ * вовсе — они ничего не говорят о языке текста.
+ *
+ * Порог в 20% для «прочих» и для кириллицы — не педантизм: в живой выдаче
+ * постоянно попадаются посты с приклеенными английскими хештегами в хвосте
+ * (русский пост с #threads #video в конце, хинди-пост с латинскими тегами).
+ * Без порога пара латинских букв в хвосте перекрасила бы всю метку в "en"
+ * или "other" и соврала бы про язык самого поста.
+ */
+export function detectLang(text: string): Lang | null {
+  let cyrillic = 0;
+  let latin = 0;
+  let other = 0;
+
+  for (const char of text) {
+    if (/[а-яё]/i.test(char)) cyrillic += 1;
+    else if (/[a-z]/i.test(char)) latin += 1;
+    else if (/\p{L}/u.test(char)) other += 1;
+  }
+
+  const total = cyrillic + latin + other;
+  if (total === 0) return null;
+
+  if (other / total >= 0.2) return "other";
+  if (cyrillic / total >= 0.2) return "ru";
+  if (latin > 0) return "en";
+  return null;
+}
+
 /** Сырьё, снятое со страницы: строки как есть, без интерпретации. */
 export type RawCard = {
   href: string | null;
@@ -124,6 +179,7 @@ export type PostCard = {
   reposts: number | null;
   media: MediaKind | null;
   mediaCount: number | null;
+  lang: Lang | null;
 };
 
 export function authorFromUrl(url: string | null): string | null {
@@ -140,7 +196,10 @@ export function authorFromUrl(url: string | null): string | null {
  * видео с темой, но без подписи), и терять такую карточку целиком нельзя.
  */
 export function buildCard(raw: RawCard): PostCard | null {
-  const text = raw.text.trim();
+  // Хвост-подпись кнопки перевода отрезаем до определения языка: иначе
+  // приклеенное Threads слово "Translate"/"Перевести" само попадёт в подсчёт
+  // букв и будет тянуть метку в сторону английского.
+  const text = stripTranslateTail(raw.text.trim());
   if (!text && !raw.href) return null;
 
   const url = raw.href ? new URL(raw.href, URLS.home).toString() : null;
@@ -156,5 +215,6 @@ export function buildCard(raw: RawCard): PostCard | null {
     reposts: parseCount(raw.repostLabel),
     media,
     mediaCount,
+    lang: detectLang(text),
   };
 }

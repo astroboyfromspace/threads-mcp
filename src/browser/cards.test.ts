@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authorFromUrl, buildCard, classifyMedia, countMedia, parseCount } from "./cards.js";
+import { authorFromUrl, buildCard, classifyMedia, countMedia, detectLang, parseCount, stripTranslateTail } from "./cards.js";
 
 describe("parseCount", () => {
   it("читает голое число", () => {
@@ -113,6 +113,61 @@ describe("countMedia", () => {
   });
 });
 
+describe("stripTranslateTail", () => {
+  // Ровно то, что живьём приклеивает Threads к переводимым постам: два
+  // неразрывных пробела и подпись кнопки.
+  it("отрезает английский хвост Translate", () => {
+    expect(stripTranslateTail("Текст поста  Translate")).toBe("Текст поста");
+  });
+
+  it("отрезает русский хвост Перевести", () => {
+    expect(stripTranslateTail("पोस्ट  Перевести")).toBe("पोस्ट");
+  });
+
+  // Обычный пробел — не признак служебного хвоста: живое слово Translate в
+  // конце английского предложения трогать нельзя.
+  it("не трогает Translate после обычного пробела", () => {
+    expect(stripTranslateTail("Click here to Translate")).toBe("Click here to Translate");
+  });
+
+  it("не трогает текст без хвоста", () => {
+    expect(stripTranslateTail("просто пост")).toBe("просто пост");
+  });
+});
+
+describe("detectLang", () => {
+  it("чисто английский текст — en", () => {
+    expect(detectLang("hello world from threads")).toBe("en");
+  });
+
+  it("чисто русский текст — ru", () => {
+    expect(detectLang("привет всем в тредах")).toBe("ru");
+  });
+
+  // Латинские хештеги в хвосте русского поста не должны перекрашивать метку.
+  it("русский пост с латинскими хештегами остаётся ru", () => {
+    expect(detectLang("Сегодня отличный день в парке #threads #life #video")).toBe("ru");
+  });
+
+  // Хинди-пост с латинскими хештегами — доля «прочих» букв велика, метка other.
+  it("хинди с латинскими хештегами — other", () => {
+    expect(detectLang("आज मौसम बहुत अच्छा है #threads #life")).toBe("other");
+  });
+
+  it("арабский текст — other", () => {
+    expect(detectLang("مرحبا بكم في هذا اليوم الجميل")).toBe("other");
+  });
+
+  // Только эмодзи, цифры и пунктуация — букв не нашлось вовсе, язык неизвестен.
+  it("строка из эмодзи — null", () => {
+    expect(detectLang("🔥🔥🔥 123 !!!")).toBeNull();
+  });
+
+  it("пустая строка — null", () => {
+    expect(detectLang("")).toBeNull();
+  });
+});
+
 const RAW = {
   href: "/@someone/post/abc123",
   text: "просто пост",
@@ -135,7 +190,16 @@ describe("buildCard", () => {
       reposts: 0,
       media: "image",
       mediaCount: 1,
+      lang: "ru",
     });
+  });
+
+  // Хвост-подпись кнопки перевода отрезается ещё на этапе сборки карточки,
+  // и язык определяется уже по чистому тексту.
+  it("отрезает хвост Translate и определяет язык по чистому тексту", () => {
+    const card = buildCard({ ...RAW, text: "hello there  Translate" });
+    expect(card?.text).toBe("hello there");
+    expect(card?.lang).toBe("en");
   });
 
   it("достраивает относительную ссылку до абсолютной", () => {

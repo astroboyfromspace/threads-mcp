@@ -1,0 +1,150 @@
+import Database from "better-sqlite3";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import type { MediaKind } from "../browser/cards.js";
+
+export type CollectedPost = {
+  url: string;
+  author: string | null;
+  text: string;
+  publishedAt: string | null;
+  likes: number | null;
+  replies: number | null;
+  reposts: number | null;
+  media: MediaKind | null;
+  mediaCount: number | null;
+  source: "search" | "feed";
+  foundBy: string | null;
+};
+
+export type CollectDb = {
+  syncQueries(words: string[]): void;
+  nextQueries(count: number): string[];
+  insertPosts(posts: CollectedPost[], at: number): number;
+  recordRun(word: string, result: { newPosts?: number; error?: string }, at: number): void;
+  lastError(word: string): string | null;
+  totalPosts(): number;
+  allPosts(): CollectedPost[];
+  close(): void;
+};
+
+/**
+ * База сборщика — отдельный файл, не сервисный state.db.
+ *
+ * Там живут токен и журнал действий, и датасету рядом с ними делать нечего:
+ * отдельный файл копируется, архивируется и удаляется целиком, не задевая
+ * работу сервиса.
+ */
+export function openCollectDb(path: string): CollectDb {
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS post (
+      url          TEXT PRIMARY KEY,
+      author       TEXT,
+      text         TEXT NOT NULL,
+      published_at TEXT,
+      likes        INTEGER,
+      replies      INTEGER,
+      reposts      INTEGER,
+      media        TEXT,
+      media_count  INTEGER,
+      source       TEXT NOT NULL,
+      found_by     TEXT,
+      collected_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS query (
+      text        TEXT PRIMARY KEY,
+      last_run_at INTEGER,
+      runs        INTEGER NOT NULL DEFAULT 0,
+      last_new    INTEGER,
+      last_error  TEXT
+    );
+  `);
+
+  const insertPost = db.prepare(`
+    INSERT OR IGNORE INTO post
+      (url, author, text, published_at, likes, replies, reposts, media, media_count, source, found_by, collected_at)
+    VALUES
+      (@url, @author, @text, @publishedAt, @likes, @replies, @reposts, @media, @mediaCount, @source, @foundBy, @collectedAt)
+  `);
+
+  const insertMany = db.transaction((posts: CollectedPost[], at: number) => {
+    let added = 0;
+    for (const post of posts) {
+      added += insertPost.run({ ...post, collectedAt: at }).changes;
+    }
+    return added;
+  });
+
+  return {
+    syncQueries(words) {
+      const insert = db.prepare(`INSERT OR IGNORE INTO query (text) VALUES (?)`);
+      db.transaction(() => {
+        for (const word of words) insert.run(word);
+      })();
+    },
+
+    // Слова, которых давно не касались, идут первыми: повторный заход по
+    // свежеискавшемуся слову принесёт ту же выдачу, и дедуп её выбросит.
+    nextQueries(count) {
+      const rows = db
+        .prepare(
+          `SELECT text FROM query
+           ORDER BY last_run_at IS NOT NULL, last_run_at ASC, text ASC
+           LIMIT ?`,
+        )
+        .all(count) as Array<{ text: string }>;
+      return rows.map((row) => row.text);
+    },
+
+    insertPosts(posts, at) {
+      if (posts.length === 0) return 0;
+      return insertMany(posts, at);
+    },
+
+    recordRun(word, result, at) {
+      db.prepare(
+        `UPDATE query
+            SET last_run_at = ?, runs = runs + 1, last_new = ?, last_error = ?
+          WHERE text = ?`,
+      ).run(at, result.newPosts ?? null, result.error ?? null, word);
+    },
+
+    lastError(word) {
+      const row = db.prepare(`SELECT last_error FROM query WHERE text = ?`).get(word) as
+        | { last_error: string | null }
+        | undefined;
+      return row?.last_error ?? null;
+    },
+
+    totalPosts() {
+      const row = db.prepare(`SELECT COUNT(*) AS n FROM post`).get() as { n: number };
+      return row.n;
+    },
+
+    allPosts() {
+      const rows = db.prepare(`SELECT * FROM post ORDER BY collected_at, url`).all() as Array<Record<string, unknown>>;
+      return rows.map((row) => ({
+        url: row.url as string,
+        author: row.author as string | null,
+        text: row.text as string,
+        publishedAt: row.published_at as string | null,
+        likes: row.likes as number | null,
+        replies: row.replies as number | null,
+        reposts: row.reposts as number | null,
+        media: row.media as MediaKind | null,
+        mediaCount: row.media_count as number | null,
+        source: row.source as "search" | "feed",
+        foundBy: row.found_by as string | null,
+      }));
+    },
+
+    close() {
+      db.close();
+    },
+  };
+}

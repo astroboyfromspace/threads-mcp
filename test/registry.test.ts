@@ -257,6 +257,72 @@ describe("журнал действий", () => {
     expect(JSON.parse(row!.result)).toEqual({ count: 1 });
   });
 
+  it("для read_profile тоже пишет сводку — по вложенному posts, а не результат целиком", async () => {
+    vi.mocked(browser.readProfile).mockResolvedValueOnce({
+      username: "someone",
+      posts: [
+        {
+          author: "someone",
+          url: "https://t/1",
+          text: "пост профиля с длинным текстом",
+          publishedAt: null,
+          likes: 0,
+          replies: 0,
+          reposts: 0,
+          media: "none",
+          mediaCount: 0,
+        },
+      ],
+    });
+
+    await execute("read_profile", { username: "someone" });
+
+    const row = getDb()
+      .prepare<[], { result: string }>("SELECT result FROM action_log WHERE action = 'read_profile' ORDER BY id DESC LIMIT 1")
+      .get();
+    expect(JSON.parse(row!.result)).toEqual({ count: 1 });
+    expect(row!.result).not.toContain("пост профиля");
+  });
+
+  it("для read_replies тоже пишет сводку — по вложенному replies, а не результат целиком", async () => {
+    vi.mocked(browser.readReplies).mockResolvedValueOnce({
+      url: "https://www.threads.net/@someone/post/abc",
+      post: {
+        author: "someone",
+        url: "https://www.threads.net/@someone/post/abc",
+        text: "исходный пост",
+        publishedAt: null,
+        likes: 0,
+        replies: 1,
+        reposts: 0,
+        media: "none",
+        mediaCount: 0,
+      },
+      replies: [
+        {
+          author: "other",
+          url: "https://t/reply-1",
+          text: "длинный текст ответа",
+          publishedAt: null,
+          likes: 0,
+          replies: 0,
+          reposts: 0,
+          media: "none",
+          mediaCount: 0,
+          hidden: false,
+        },
+      ],
+    });
+
+    await execute("read_replies", { url: "https://www.threads.net/@someone/post/abc" });
+
+    const row = getDb()
+      .prepare<[], { result: string }>("SELECT result FROM action_log WHERE action = 'read_replies' ORDER BY id DESC LIMIT 1")
+      .get();
+    expect(JSON.parse(row!.result)).toEqual({ count: 1, hasPost: true });
+    expect(row!.result).not.toContain("длинный текст ответа");
+  });
+
   it("для остальных действий журналирует результат как есть", async () => {
     await execute("publish_post", { text: "как есть" });
 

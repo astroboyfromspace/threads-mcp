@@ -104,16 +104,23 @@ describe("ротация слов", () => {
   // честно отработанный заход, иначе слово уедет в конец очереди ротации,
   // ничего не собрав.
   it("recordError не трогает last_run_at и runs", () => {
-    db.syncQueries(["a", "b"]);
-    db.recordRun("a", { newPosts: 5 }, 1000);
+    db.syncQueries(["a", "b", "c"]);
+    // Смешанная выборка: у всех трёх слов уже есть честный заход, чтобы
+    // тай-брейк по алфавиту не мог случайно замаскировать баг.
+    db.recordRun("a", { newPosts: 5 }, 1_000);
+    db.recordRun("b", { newPosts: 2 }, 2_000);
+    db.recordRun("c", { newPosts: 3 }, 500);
 
-    db.recordError("a", "RATE_LIMITED", 2000);
+    db.recordError("a", "RATE_LIMITED", 9_999);
 
+    // runs проверяем напрямую: recordError не должен был его увеличить.
+    expect(db.runs("a")).toBe(1);
     expect(db.lastError("a")).toBe("RATE_LIMITED");
-    // last_run_at у "a" остался прежним (1000) — среди искавшихся оно всё ещё
-    // самое давнее только если "b" ни разу не искали, что и проверяем: "b"
-    // как ни разу не искавшееся идёт первым, а "a" — вторым, с тем же местом,
-    // что было бы и без recordError.
-    expect(db.nextQueries(2)).toEqual(["b", "a"]);
+
+    // last_run_at у "a" остался прежним (1000), а не подскочил до 9999 —
+    // иначе "a" уехало бы в конец очереди. Порядок по давности:
+    // c (500) < a (1000) < b (2000). Если бы recordError вёл себя как
+    // recordRun, порядок стал бы c, b, a — тест поймал бы это напрямую.
+    expect(db.nextQueries(3)).toEqual(["c", "a", "b"]);
   });
 });

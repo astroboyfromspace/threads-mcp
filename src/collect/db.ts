@@ -24,6 +24,8 @@ export type CollectDb = {
   recordRun(word: string, result: { newPosts?: number; error?: string }, at: number): void;
   recordError(word: string, error: string, at: number): void;
   lastError(word: string): string | null;
+  /** Сколько раз слово честно отработало заход (recordRun). Нужен тестам: recordError не должен это трогать. */
+  runs(word: string): number;
   totalPosts(): number;
   allPosts(): CollectedPost[];
   close(): void;
@@ -127,6 +129,11 @@ export function openCollectDb(path: string): CollectDb {
         | { last_error: string | null }
         | undefined;
       return row?.last_error ?? null;
+    },
+
+    runs(word) {
+      const row = db.prepare(`SELECT runs FROM query WHERE text = ?`).get(word) as { runs: number } | undefined;
+      return row?.runs ?? 0;
     },
 
     totalPosts() {

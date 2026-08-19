@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyMedia, parseCount } from "./cards.js";
+import { authorFromUrl, buildCard, classifyMedia, parseCount } from "./cards.js";
 
 describe("parseCount", () => {
   it("читает голое число", () => {
@@ -56,5 +56,62 @@ describe("classifyMedia", () => {
   // Если отличить медиа поста от аватара не удалось, честный ответ — «не знаю».
   it("неопознанная карточка — null, а не none", () => {
     expect(classifyMedia(null)).toEqual({ media: null, mediaCount: null });
+  });
+});
+
+const RAW = {
+  href: "/@someone/post/abc123",
+  text: "просто пост",
+  datetime: "2026-08-18T10:00:00.000Z",
+  likeLabel: "Like 5",
+  replyLabel: "Reply 2",
+  repostLabel: "Repost",
+  media: { images: 1, videos: 0 },
+};
+
+describe("buildCard", () => {
+  it("собирает карточку целиком", () => {
+    expect(buildCard(RAW)).toEqual({
+      author: "someone",
+      url: "https://www.threads.net/@someone/post/abc123",
+      text: "просто пост",
+      publishedAt: "2026-08-18T10:00:00.000Z",
+      likes: 5,
+      replies: 2,
+      reposts: 0,
+      media: "image",
+      mediaCount: 1,
+    });
+  });
+
+  it("достраивает относительную ссылку до абсолютной", () => {
+    expect(buildCard(RAW)?.url).toBe("https://www.threads.net/@someone/post/abc123");
+  });
+
+  // Ответы в ленте бывают без пермалинка — это не повод терять сам текст.
+  it("переживает отсутствие ссылки", () => {
+    const card = buildCard({ ...RAW, href: null });
+    expect(card?.url).toBeNull();
+    expect(card?.author).toBeNull();
+    expect(card?.text).toBe("просто пост");
+  });
+
+  it("пустой контейнер карточкой не считается", () => {
+    expect(buildCard({ ...RAW, text: "   " })).toBeNull();
+  });
+
+  it("не выдумывает время, когда его нет", () => {
+    expect(buildCard({ ...RAW, datetime: null })?.publishedAt).toBeNull();
+  });
+});
+
+describe("authorFromUrl", () => {
+  it("достаёт автора из пермалинка", () => {
+    expect(authorFromUrl("https://www.threads.net/@someone/post/abc")).toBe("someone");
+  });
+
+  it("на чужой ссылке молчит", () => {
+    expect(authorFromUrl("https://www.threads.net/search?q=x")).toBeNull();
+    expect(authorFromUrl(null)).toBeNull();
   });
 });

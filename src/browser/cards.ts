@@ -6,6 +6,8 @@
  * испортит весь датасет и обнаружится, когда по нему уже посчитают статистику.
  */
 
+import { URLS } from "./selectors.js";
+
 export type MediaKind = "none" | "image" | "video" | "mixed";
 
 const SCALES: Array<{ pattern: RegExp; factor: number }> = [
@@ -55,4 +57,54 @@ export function classifyMedia(counts: { images: number; videos: number } | null)
   if (videos > 0) return { media: "video", mediaCount };
   if (images > 0) return { media: "image", mediaCount };
   return { media: "none", mediaCount: 0 };
+}
+
+/** Сырьё, снятое со страницы: строки как есть, без интерпретации. */
+export type RawCard = {
+  href: string | null;
+  text: string;
+  datetime: string | null;
+  likeLabel: string | null;
+  replyLabel: string | null;
+  repostLabel: string | null;
+  media: { images: number; videos: number } | null;
+};
+
+export type PostCard = {
+  author: string | null;
+  url: string | null;
+  text: string;
+  publishedAt: string | null;
+  likes: number | null;
+  replies: number | null;
+  reposts: number | null;
+  media: MediaKind | null;
+  mediaCount: number | null;
+};
+
+export function authorFromUrl(url: string | null): string | null {
+  if (!url) return null;
+  const match = /\/@([^/]+)\/post\//.exec(url);
+  return match?.[1] ?? null;
+}
+
+/** Превращает сырьё в карточку. null — если в контейнере не было текста. */
+export function buildCard(raw: RawCard): PostCard | null {
+  const text = raw.text.trim();
+  if (!text) return null;
+
+  const url = raw.href ? new URL(raw.href, URLS.home).toString() : null;
+  const { media, mediaCount } = classifyMedia(raw.media);
+
+  return {
+    author: authorFromUrl(url),
+    url,
+    text,
+    publishedAt: raw.datetime,
+    likes: parseCount(raw.likeLabel),
+    replies: parseCount(raw.replyLabel),
+    reposts: parseCount(raw.repostLabel),
+    media,
+    mediaCount,
+  };
 }

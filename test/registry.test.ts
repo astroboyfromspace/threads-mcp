@@ -203,6 +203,68 @@ describe("журнал действий", () => {
       .get();
     expect(row).toMatchObject({ error_code: "INVALID_INPUT", ok: 0 });
   });
+
+  // Сборщик датасета намеренно не трогает сервисную БД, но журнал живёт в
+  // ней же: каждый search_posts кладёт туда сотню карточек с текстами, если
+  // писать результат целиком. За десяток прогонов это десятки мегабайт дубля
+  // датасета и нечитаемый журнал.
+  it("для читалок пишет короткую сводку, а не результат целиком", async () => {
+    vi.mocked(browser.searchPosts).mockResolvedValueOnce({
+      query: "today",
+      sort: "recent",
+      posts: [
+        {
+          author: "a",
+          url: "https://t/1",
+          text: "первый пост с длинным текстом",
+          publishedAt: null,
+          likes: 1,
+          replies: 0,
+          reposts: 0,
+          media: "none",
+          mediaCount: 0,
+        },
+        {
+          author: "b",
+          url: "https://t/2",
+          text: "второй пост",
+          publishedAt: null,
+          likes: 0,
+          replies: 0,
+          reposts: 0,
+          media: "none",
+          mediaCount: 0,
+        },
+      ],
+    });
+
+    await execute("search_posts", { query: "today" });
+
+    const row = getDb()
+      .prepare<[], { result: string }>("SELECT result FROM action_log WHERE action = 'search_posts' ORDER BY id DESC LIMIT 1")
+      .get();
+    const logged = JSON.parse(row!.result) as unknown;
+    expect(logged).toEqual({ count: 2 });
+    expect(row!.result).not.toContain("второй пост");
+  });
+
+  it("для действий-читалок массивом (лента) тоже пишет сводку", async () => {
+    await execute("read_feed", {});
+
+    const row = getDb()
+      .prepare<[], { result: string }>("SELECT result FROM action_log WHERE action = 'read_feed' ORDER BY id DESC LIMIT 1")
+      .get();
+    expect(JSON.parse(row!.result)).toEqual({ count: 1 });
+  });
+
+  it("для остальных действий журналирует результат как есть", async () => {
+    await execute("publish_post", { text: "как есть" });
+
+    const row = getDb()
+      .prepare<[], { result: string }>("SELECT result FROM action_log WHERE action = 'publish_post' ORDER BY id DESC LIMIT 1")
+      .get();
+    expect(JSON.parse(row!.result)).toEqual({ id: "graph-post" });
+  });
 });
 
 describe("разлогиненная сессия", () => {

@@ -107,6 +107,25 @@ describe("runCollection", () => {
     expect(client.searchPosts).toHaveBeenCalledTimes(3);
   });
 
+  // Разные показы одной и той же карточки несут разные трекинговые параметры —
+  // без нормализации ссылки дедуп по PRIMARY KEY не срабатывает и пост
+  // ложится несколькими строками.
+  it("нормализует ссылку перед дедупом — трекинговые параметры не создают дубль", async () => {
+    const client = fakeClient(0);
+    client.searchPosts = vi.fn(async (query: string) => ({
+      query,
+      posts: [
+        { ...card("https://t/post/1?xmt=abc123"), author: "someone" },
+        { ...card("https://t/post/1?igshid=xyz789#reply"), author: "someone" },
+      ],
+    }));
+
+    await runCollection({ db, client, sleep: async () => {} }, { target: 1000, limit: 2 });
+
+    expect(db.totalPosts()).toBe(1);
+    expect(db.allPosts()[0]!.url).toBe("https://t/post/1");
+  });
+
   // Пауза нужна между запросами, а не после последнего — ждать перед выходом незачем.
   it("не спит после последнего слова", async () => {
     const client = fakeClient(1);

@@ -1,3 +1,4 @@
+import type { PostCard } from "../browser/cards.js";
 import type { CollectDb, CollectedPost } from "./db.js";
 
 /** То, что прогону нужно от сервиса. Ровно два действия — больше он не зовёт. */
@@ -6,17 +7,12 @@ export type ThreadsClient = {
   searchPosts(query: string, limit: number): Promise<{ query: string; posts: PostCardDto[] }>;
 };
 
-export type PostCardDto = {
-  author: string | null;
-  url: string | null;
-  text: string;
-  publishedAt: string | null;
-  likes: number | null;
-  replies: number | null;
-  reposts: number | null;
-  media: CollectedPost["media"];
-  mediaCount: number | null;
-};
+// Не копия PostCard, а он сам: рукописный дубль однажды разъедется с ним при
+// добавлении поля, typecheck промолчит, а better-sqlite3 неизвестный именованный
+// параметр просто проигнорирует — колонка навсегда останется пустой.
+// cards.ts тянет только selectors.ts и не тянет playwright, так что сборщик
+// по-прежнему не тащит браузер за собой.
+export type PostCardDto = PostCard;
 
 export type CollectionReport = {
   newPosts: number;
@@ -41,10 +37,28 @@ const FATAL = new Set(["NEEDS_LOGIN", "SELECTOR_MISS"]);
 const codeOf = (error: unknown): string =>
   typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "INTERNAL";
 
-/** Пост без ссылки в датасет не годится: дедуп опирается на неё как на ключ. */
+/**
+ * Ссылки в выдаче Threads несут трекинговые параметры (`?xmt=…`, `igshid=…` и
+ * подобные), разные при каждом показе одного и того же поста. Если положить их
+ * в PRIMARY KEY как есть, один пост ляжет несколькими строками, и обещанный
+ * «дедуп по ссылке бесплатно» перестанет работать. Оставляем origin + pathname,
+ * query и hash отбрасываем.
+ */
+function normalizeUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin + parsed.pathname;
+  } catch {
+    return null;
+  }
+}
+
+/** Пост без разбираемой ссылки в датасет не годится: дедуп опирается на неё как на ключ. */
 function toStored(card: PostCardDto, source: "search" | "feed", foundBy: string | null): CollectedPost | null {
   if (!card.url) return null;
-  return { ...card, url: card.url, source, foundBy };
+  const url = normalizeUrl(card.url);
+  if (!url) return null;
+  return { ...card, url, source, foundBy };
 }
 
 export async function runCollection(deps: Deps, options: Options): Promise<CollectionReport> {

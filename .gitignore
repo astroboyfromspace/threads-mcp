@@ -16,3 +16,6 @@ failures/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Изолированные worktree агентов
+.claude/worktrees/

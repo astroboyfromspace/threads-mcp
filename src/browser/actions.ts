@@ -1,7 +1,18 @@
 import type { Locator, Page } from "playwright";
 import { ActionError } from "../errors.js";
 import { buildCard, type PostCard } from "./cards.js";
-import { BUTTON_LABELS, LOGGED_OUT_HINTS, POST_CONTAINER, POST_MEDIA, POST_PERMALINK, POST_TIME, SEARCH_URL, URLS } from "./selectors.js";
+import {
+  BUTTON_LABELS,
+  LOGGED_OUT_HINTS,
+  POST_CONTAINER,
+  POST_MEDIA,
+  POST_PERMALINK,
+  POST_TEXT_EXCLUDE,
+  POST_TEXT_SPAN,
+  POST_TIME,
+  SEARCH_URL,
+  URLS,
+} from "./selectors.js";
 import { captureFailure, humanDelay, session } from "./session.js";
 
 /** Ищет элемент нужной роли по любой из подписей (интерфейс может быть на русском или английском). */
@@ -391,15 +402,19 @@ async function collectPosts(page: Page, limit: number, label: string, options: C
 }
 
 /**
- * Достаёт из контейнера то, что нам нужно от поста; null — если контейнер пустой.
+ * Достаёт из контейнера то, что нам нужно от поста; null — если контейнер
+ * пустой: нет ни текста, ни ссылки на пост. Пост без текста (например, видео
+ * с темой без подписи) — законный случай, его отбрасывать нельзя; этим же
+ * правилом руководствуется buildCard в cards.ts, здесь — только ранний выход,
+ * чтобы не делать лишних round-trip за датой и счётчиками для пустых карточек.
  *
  * href принимается уже готовым: вызывающая сторона всё равно достаёт его сама
  * (чтобы решить, разбирать ли контейнер заново), и повторный round-trip за тем
  * же атрибутом был бы лишним.
  */
 async function itemFrom(container: Locator, href: string | null): Promise<FeedItem | null> {
-  const text = (await container.innerText().catch(() => "")).trim();
-  if (!text) return null;
+  const text = await textOf(container);
+  if (!text && !href) return null;
 
   const datetime = await container.locator(POST_TIME).first().getAttribute("datetime").catch(() => null);
 
@@ -414,42 +429,107 @@ async function itemFrom(container: Locator, href: string | null): Promise<FeedIt
   });
 }
 
+/** Возвращается, когда кнопка найдена, но ни текст, ни aria-label числа не несут — законный ноль, а не «не нашли». */
+const FOUND_EMPTY_LABEL = "0";
+
 /**
- * Подпись первой подходящей кнопки внутри карточки; null — если такой кнопки нет.
+ * Подпись первой подходящей кнопки внутри карточки.
  *
- * Доступное имя не обязано лежать в aria-label: Threads рисует счётчик и
- * текстом внутри кнопки. Поэтому сначала атрибут, а если его нет — содержимое.
+ * null — кнопка не нашлась вообще; это отличие важно: на нём стоит страж
+ * сломанной вёрстки в collectPosts, который должен падать только когда
+ * счётчика не нашлось вовсе, а не когда он честно нулевой.
+ *
+ * Число Threads рисует текстом внутри кнопки, а не в aria-label: атрибут
+ * держит неизменный глагол («Like», «Repost») без счётчика, поэтому в
+ * приоритете содержимое, атрибут — запасной источник. У поста без лайков
+ * текст внутри кнопки пустой — это законный ноль: кнопка найдена, просто
+ * подписывать нечем, и возвращать null здесь означало бы путать его с
+ * ненайденной кнопкой.
  */
 async function labelOf(container: Locator, labels: readonly RegExp[]): Promise<string | null> {
   const button = buttonByLabels(container, labels).first();
   if ((await button.count().catch(() => 0)) === 0) return null;
 
+  const text = await button.innerText().catch(() => "");
+  if (text.trim()) return text;
+
   const aria = await button.getAttribute("aria-label").catch(() => null);
   if (aria?.trim()) return aria;
 
-  const text = await button.innerText().catch(() => "");
-  return text.trim() || null;
+  return FOUND_EMPTY_LABEL;
 }
 
 /**
- * Считает медиа внутри карточки, вычитая аватар автора.
+ * Считает медиа внутри карточки по подписи и отрисованному размеру картинок —
+ * см. POST_MEDIA в selectors.ts за объяснением, почему не по положению в
+ * вёрстке. Выполняется одним evaluate: правило завязано на geometry
+ * (getBoundingClientRect), а её нельзя получить локатором без похода в
+ * браузер за каждой картинкой отдельно.
  *
- * Отрицательный остаток означает, что эвристика не сошлась с вёрсткой: тогда
- * отдаём null. Записать «медиа нет» в этом случае было бы худшим исходом —
- * ошибка уехала бы в датасет молча.
+ * null — только если среди подходящих по подписи картинок ни у одной не
+ * удалось получить размер (нулевой или отсутствующий — так бывает у ещё не
+ * отрисованных лениво картинок). Выдуманный ноль в этом случае хуже честного
+ * «не знаю»: он молча соврёт в датасет.
  */
 async function mediaOf(container: Locator): Promise<{ images: number; videos: number } | null> {
   try {
-    const images = await container.locator(POST_MEDIA.image).count();
-    const videos = await container.locator(POST_MEDIA.video).count();
-    const avatars = await container.locator(`${POST_MEDIA.avatarLink} ${POST_MEDIA.image}`).count();
+    return await container.evaluate((el, { image, video, avatarAltPattern, minWidth }) => {
+      const avatarAlt = new RegExp(avatarAltPattern, "i");
+      const videos = el.querySelectorAll(video).length;
 
-    const own = images - avatars;
-    if (own < 0) return null;
-    return { images: own, videos };
+      // Проект собирается без lib "dom" (Node-код), поэтому DOM-типы внутри
+      // browser-колбэка не видны tsc — приводим через any, код всё равно
+      // выполняется в браузере Playwright, а не проверяется здесь по типам.
+      const imgs = Array.from(el.querySelectorAll(image)) as any[];
+      const candidates = imgs.filter((img) => !avatarAlt.test(img.alt || ""));
+      if (candidates.length === 0) return { images: 0, videos };
+
+      const withSize = candidates.filter((img) => img.getBoundingClientRect().width > 0);
+      if (withSize.length === 0) return null;
+
+      const images = withSize.filter((img) => img.getBoundingClientRect().width >= minWidth).length;
+      return { images, videos };
+    }, POST_MEDIA);
   } catch {
     return null;
   }
+}
+
+/**
+ * Тело поста — самый длинный span[dir="auto"] внутри карточки без предка-
+ * ссылки и предка-кнопки, см. POST_TEXT_SPAN и POST_TEXT_EXCLUDE в
+ * selectors.ts. Обход — через evaluate: правило про предков нельзя выразить
+ * локатором Playwright, а обходить каждый span отдельным round-trip дорого.
+ *
+ * closest() не годится напрямую: если саму карточку когда-нибудь завернут в
+ * ссылку целиком, он найдёт предка-ссылку и снаружи контейнера. Поэтому
+ * поднимаемся вручную и останавливаемся на границе контейнера.
+ */
+async function textOf(container: Locator): Promise<string> {
+  return container.evaluate((el, { spanSelector, excludeSelector }) => {
+    // Тот же повод для any, что и в mediaOf выше: DOM-типы недоступны tsc в
+    // Node-конфигурации проекта, а сам код выполняется в браузере.
+    const spans = Array.from(el.querySelectorAll(spanSelector)) as any[];
+    let longest = "";
+
+    for (const span of spans) {
+      let node: any = span;
+      let excluded = false;
+      while (node && node !== el) {
+        if (node.matches(excludeSelector)) {
+          excluded = true;
+          break;
+        }
+        node = node.parentElement;
+      }
+      if (excluded) continue;
+
+      const value = (span.textContent ?? "").trim();
+      if (value.length > longest.length) longest = value;
+    }
+
+    return longest;
+  }, { spanSelector: POST_TEXT_SPAN, excludeSelector: POST_TEXT_EXCLUDE });
 }
 
 /** Ключ для отсева повторов: ответ может быть и без пермалинка, тогда опознаём по тексту. */

@@ -55,3 +55,29 @@ export const POST_CONTAINER = '[data-pressable-container="true"]';
 
 /** Ссылка на пост — из неё достаётся автор и shortcode. */
 export const POST_PERMALINK = 'a[href*="/post/"]';
+
+/** Страница поиска. `recent` — вкладка свежего, без неё Threads отдаёт топ. */
+export const SEARCH_URL = (query: string, sort: "top" | "recent"): string => {
+  const url = new URL("/search", URLS.home);
+  url.searchParams.set("q", query);
+  url.searchParams.set("serp_type", "default");
+  if (sort === "recent") url.searchParams.set("filter", "recent");
+  return url.toString();
+};
+
+/** Время публикации: Threads рисует его тегом <time> с машинным datetime. */
+export const POST_TIME = "time[datetime]";
+
+/**
+ * Медиа поста.
+ *
+ * Аватар автора в разметке — такая же картинка, поэтому опознать медиа можно
+ * только исключением: аватар лежит внутри ссылки на профиль (без `/post/` в
+ * href) и подписан как фото профиля. Эвристика проверяется на живой странице;
+ * если она не работает, честный ответ — null, а не «медиа нет».
+ */
+export const POST_MEDIA = {
+  image: 'img:not([alt*="profile pic" i]):not([alt*="фото профиля" i])',
+  video: "video",
+  avatarLink: 'a[href^="/@"]:not([href*="/post/"])',
+} as const;

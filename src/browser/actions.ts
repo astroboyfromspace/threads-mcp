@@ -1,6 +1,7 @@
 import type { Locator, Page } from "playwright";
 import { ActionError } from "../errors.js";
-import { BUTTON_LABELS, LOGGED_OUT_HINTS, POST_CONTAINER, POST_PERMALINK, URLS } from "./selectors.js";
+import { buildCard, type PostCard } from "./cards.js";
+import { BUTTON_LABELS, LOGGED_OUT_HINTS, POST_CONTAINER, POST_MEDIA, POST_PERMALINK, POST_TIME, SEARCH_URL, URLS } from "./selectors.js";
 import { captureFailure, humanDelay, session } from "./session.js";
 
 /** Ищет элемент нужной роли по любой из подписей (интерфейс может быть на русском или английском). */
@@ -181,11 +182,9 @@ export async function unfollowUser(username: string): Promise<{ changed: boolean
   });
 }
 
-export type FeedItem = {
-  author: string | null;
-  url: string | null;
-  text: string;
-};
+// Историческое имя оставлено, чтобы не трогать сигнатуры действий: форма
+// карточки одна и та же и в ленте, и в поиске, и в ответах.
+export type FeedItem = PostCard;
 
 /** Читает ленту, подгружая её скроллом, пока не наберётся нужное число постов. */
 export async function readFeed(limit = 20): Promise<FeedItem[]> {
@@ -329,7 +328,18 @@ async function collectPosts(page: Page, limit: number, label: string): Promise<F
     return selectorMiss(page, label, "Не нашёл ни одного поста — вероятно, Threads изменил вёрстку");
   }
 
-  return [...seen.values()];
+  const items = [...seen.values()];
+
+  // Пост без лайков честно даёт ноль, но чтобы у сотни постов подряд не нашлось
+  // ни одного счётчика, Threads должен переехать. Отдать в датасет страницу
+  // сплошных null — значит спрятать поломку до момента, когда по данным уже
+  // посчитают статистику. Порог в пять карточек оставлен на случай, когда
+  // выдача действительно крошечная.
+  if (items.length >= 5 && items.every((item) => item.likes === null && item.replies === null)) {
+    return selectorMiss(page, label, "Ни у одного поста не нашлось счётчиков — вероятно, Threads изменил вёрстку");
+  }
+
+  return items;
 }
 
 /** Достаёт из контейнера то, что нам нужно от поста; null — если контейнер пустой. */
@@ -338,8 +348,55 @@ async function itemFrom(container: Locator): Promise<FeedItem | null> {
   const text = (await container.innerText().catch(() => "")).trim();
   if (!text) return null;
 
-  const url = href ? new URL(href, URLS.home).toString() : null;
-  return { author: authorFromUrl(url), url, text };
+  const datetime = await container.locator(POST_TIME).first().getAttribute("datetime").catch(() => null);
+
+  return buildCard({
+    href,
+    text,
+    datetime,
+    likeLabel: await labelOf(container, [...BUTTON_LABELS.like, ...BUTTON_LABELS.unlike]),
+    replyLabel: await labelOf(container, [/^ответ/i, /^reply/i, /^comment/i]),
+    repostLabel: await labelOf(container, BUTTON_LABELS.repost),
+    media: await mediaOf(container),
+  });
+}
+
+/**
+ * Подпись первой подходящей кнопки внутри карточки; null — если такой кнопки нет.
+ *
+ * Доступное имя не обязано лежать в aria-label: Threads рисует счётчик и
+ * текстом внутри кнопки. Поэтому сначала атрибут, а если его нет — содержимое.
+ */
+async function labelOf(container: Locator, labels: readonly RegExp[]): Promise<string | null> {
+  const button = buttonByLabels(container, labels).first();
+  if ((await button.count().catch(() => 0)) === 0) return null;
+
+  const aria = await button.getAttribute("aria-label").catch(() => null);
+  if (aria?.trim()) return aria;
+
+  const text = await button.innerText().catch(() => "");
+  return text.trim() || null;
+}
+
+/**
+ * Считает медиа внутри карточки, вычитая аватар автора.
+ *
+ * Отрицательный остаток означает, что эвристика не сошлась с вёрсткой: тогда
+ * отдаём null. Записать «медиа нет» в этом случае было бы худшим исходом —
+ * ошибка уехала бы в датасет молча.
+ */
+async function mediaOf(container: Locator): Promise<{ images: number; videos: number } | null> {
+  try {
+    const images = await container.locator(POST_MEDIA.image).count();
+    const videos = await container.locator(POST_MEDIA.video).count();
+    const avatars = await container.locator(`${POST_MEDIA.avatarLink} ${POST_MEDIA.image}`).count();
+
+    const own = images - avatars;
+    if (own < 0) return null;
+    return { images: own, videos };
+  } catch {
+    return null;
+  }
 }
 
 /** Ключ для отсева повторов: ответ может быть и без пермалинка, тогда опознаём по тексту. */
@@ -357,10 +414,4 @@ async function assertStillLoggedIn(page: Page): Promise<void> {
     session.markLoggedOut();
     throw new ActionError("NEEDS_LOGIN", "Threads показывает страницу для незалогиненных", { retryable: false });
   }
-}
-
-function authorFromUrl(url: string | null): string | null {
-  if (!url) return null;
-  const match = /\/@([^/]+)\/post\//.exec(url);
-  return match?.[1] ?? null;
 }

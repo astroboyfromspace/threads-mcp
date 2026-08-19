@@ -22,7 +22,19 @@ vi.mock("../src/browser/actions.js", () => ({
   unfollowUser: vi.fn(async () => ({ changed: true })),
   repost: vi.fn(async () => ({ changed: true })),
   removeRepost: vi.fn(async () => ({ changed: true })),
-  readFeed: vi.fn(async () => [{ author: "someone", url: null, text: "пост" }]),
+  readFeed: vi.fn(async () => [
+    {
+      author: "someone",
+      url: null,
+      text: "пост",
+      publishedAt: null,
+      likes: 0,
+      replies: 0,
+      reposts: 0,
+      media: "none",
+      mediaCount: 0,
+    },
+  ]),
   readProfile: vi.fn(async () => ({ username: "someone", posts: [] })),
   readReplies: vi.fn(async () => ({ url: "https://www.threads.net/@someone/post/abc", post: null, replies: [] })),
 }));

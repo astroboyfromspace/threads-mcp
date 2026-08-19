@@ -101,17 +101,27 @@ describe("runCollection", () => {
   // Неверный токен иначе сжигает всю ротацию: слова получают свежий
   // last_run_at и ноль постов, хотя ничего не собрали.
   it("ошибка слова не двигает его в ротации — recordRun не зовётся", async () => {
+    // Смешанная выборка нарочно: "a" падает, "b" отрабатывает честно и сразу
+    // добирает цель. Если бы это было падение всех слов подряд, тай-брейк по
+    // алфавиту дал бы тот же порядок что с багом, что без него, и тест не
+    // отличал бы одно от другого.
     const client = fakeClient(0);
-    client.searchPosts = vi.fn(async () => {
-      throw Object.assign(new Error("сломалось"), { code: "INTERNAL" });
+    client.searchPosts = vi.fn(async (query: string) => {
+      if (query === "a") throw Object.assign(new Error("сломалось"), { code: "INTERNAL" });
+      return { query, posts: [card(`https://t/${query}`)] };
     });
+    let tick = 0;
+    const now = () => (tick += 1_000);
 
-    await runCollection({ db, client, sleep: async () => {} }, { target: 1000, limit: 1 });
+    await runCollection({ db, client, sleep: async () => {}, now }, { target: 1, limit: 1 });
 
-    // Слово "a" (первым по алфавиту среди ни разу не искавшихся) провалилось,
-    // но раз last_run_at не выставился, при следующем прогоне оно снова
-    // окажется первым в очереди — как и было до захода.
-    expect(db.nextQueries(3)).toEqual(["a", "b", "c"]);
+    // "a" провалилось и осталось без last_run_at — как и нетронутое "c"
+    // (до него прогон не дошёл: цель уже добрана словом "b"). "b" честно
+    // отработало и получило last_run_at. Тай-брейк по алфавиту разводит "a"
+    // и "c": ожидаемый порядок — a, c, b. Если бы recordError выставлял
+    // last_run_at как recordRun (регрессия), "a" получило бы метку раньше
+    // "b", и порядок стал бы c, a, b — этот тест такую мутацию ловит.
+    expect(db.nextQueries(3)).toEqual(["a", "c", "b"]);
     expect(db.lastError("a")).toBe("INTERNAL");
   });
 
@@ -191,13 +201,54 @@ describe("runCollection", () => {
       client.searchPosts = vi.fn(async () => {
         throw Object.assign(new Error("лимит"), { code: "RATE_LIMITED" });
       });
+      const sleep = vi.fn(async () => {});
 
-      const report = await runCollection({ db, client, sleep: async () => {} }, { target: 1000, limit: 1 });
+      await runCollection({ db, client, sleep }, { target: 1000, limit: 1 });
 
-      // "a" не даётся: исходный заход плюс три повтора — четыре вызова — и
-      // только тогда слово засчитывается неудачным.
-      expect(client.searchPosts).toHaveBeenCalledWith("a", 1);
+      // "a" не даётся: исходный заход плюс три повтора — ровно четыре вызова
+      // именно с этим словом — и только тогда слово засчитывается неудачным.
+      const callsForA = client.searchPosts.mock.calls.filter(([query]) => query === "a");
+      expect(callsForA).toHaveLength(4);
       expect(db.lastError("a")).toBe("RATE_LIMITED");
+
+      // Растущая пауза перед первыми тремя повторами слова "a" — они идут
+      // первыми, до любых других пауз в прогоне (между словами, для "b"/"c").
+      expect(sleep).toHaveBeenNthCalledWith(1, 60_000);
+      expect(sleep).toHaveBeenNthCalledWith(2, 180_000);
+      expect(sleep).toHaveBeenNthCalledWith(3, 600_000);
+    });
+
+    it("исчерпанная суточная квота (retry_after больше 15 минут) обрывает весь прогон, а не только слово", async () => {
+      const client = fakeClient(0);
+      client.searchPosts = vi.fn(async () => {
+        throw Object.assign(new Error("суточный лимит исчерпан"), { code: "RATE_LIMITED", retry_after: 3_600 });
+      });
+      const sleep = vi.fn(async () => {});
+
+      const report = await runCollection({ db, client, sleep }, { target: 1000, limit: 1 });
+
+      // Ни одной попытки повтора и ни одной паузы: час ждать ради одного
+      // слова бессмысленно, квота не восстановится раньше завтра.
+      expect(client.searchPosts).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+      expect(report.stoppedBy).toBe("rate_limited");
+    });
+
+    it("пауза из retry_after в любом случае ограничена потолком в 15 минут", async () => {
+      const client = fakeClient(0);
+      let call = 0;
+      client.searchPosts = vi.fn(async (query: string) => {
+        call += 1;
+        // Ровно на потолке (900с) — это ещё короткая пауза, повтор должен случиться.
+        if (call === 1) throw Object.assign(new Error("лимит"), { code: "RATE_LIMITED", retry_after: 900 });
+        return { query, posts: [card(`https://t/ok-${call}`)] };
+      });
+      const sleep = vi.fn(async () => {});
+
+      await runCollection({ db, client, sleep }, { target: 1, limit: 1 });
+
+      expect(sleep).toHaveBeenCalledWith(900_000);
+      expect(client.searchPosts).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -256,6 +307,26 @@ describe("runCollection", () => {
 
     expect(db.totalPosts()).toBe(1);
     expect(db.allPosts()[0]!.url).toBe("https://t/post/1");
+  });
+
+  // Битую ссылку — ту, которую не разбирает конструктор URL, — считаем
+  // отсутствующей: пост пропускается, как и пост без url вовсе.
+  it("пропускает пост с неразбираемой ссылкой", async () => {
+    const client = fakeClient(0);
+    client.searchPosts = vi.fn(async (query: string) => ({
+      query,
+      // Относительный путь без протокола и хоста — new URL() без базового
+      // адреса бросает TypeError на такой строке.
+      posts: [{ ...card("/post/1"), author: "someone" }, { ...card("https://t/post/2"), author: "someone" }],
+    }));
+
+    const report = await runCollection({ db, client, sleep: async () => {} }, { target: 1000, limit: 2 });
+
+    expect(db.totalPosts()).toBe(1);
+    expect(db.allPosts()[0]!.url).toBe("https://t/post/2");
+    // Все три слова ротации ("a", "b", "c") находят одну и ту же битую
+    // ссылку — по одному отброшенному посту на каждое.
+    expect(report.droppedNoUrl).toBe(3);
   });
 
   // Пауза нужна между запросами, а не после последнего — ждать перед выходом незачем.

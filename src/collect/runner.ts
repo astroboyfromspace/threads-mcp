@@ -20,7 +20,13 @@ export type CollectionReport = {
   errors: number;
   /** Карточки без разбираемой ссылки — не попали в базу, потому что дедуп опирается на url как на ключ. */
   droppedNoUrl: number;
-  stoppedBy: "target_reached" | "queries_exhausted" | "NEEDS_LOGIN" | "SELECTOR_MISS" | "too_many_errors";
+  stoppedBy:
+    | "target_reached"
+    | "queries_exhausted"
+    | "NEEDS_LOGIN"
+    | "SELECTOR_MISS"
+    | "too_many_errors"
+    | "rate_limited";
 };
 
 type Deps = {
@@ -42,6 +48,17 @@ const MAX_CONSECUTIVE_ERRORS = 5;
 /** Растущая пауза перед повтором RATE_LIMITED: используется, если сервис не прислал свой retry_after. */
 const RATE_LIMIT_PAUSES_MS = [60_000, 180_000, 600_000];
 
+/**
+ * Потолок паузы перед повтором RATE_LIMITED. Самый вероятный источник
+ * RATE_LIMITED — наш собственный суточный лимит поиска (30 запросов при
+ * списке в 82 слова), а сервис в этом случае отдаёт retry_after порядка
+ * часа. Ждать час ради одного слова, а потом ещё столько же ради следующих
+ * четырёх, — бессмысленно: квота не восстановится раньше завтра. Короткие
+ * паузы (переполненная очередь браузера — retry_after порядка 30 секунд)
+ * этого потолка не задевают и по-прежнему приводят к повтору.
+ */
+const RATE_LIMIT_PAUSE_CAP_MS = 15 * 60 * 1_000;
+
 const codeOf = (error: unknown): string =>
   typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : "INTERNAL";
 
@@ -52,11 +69,26 @@ const retryAfterOf = (error: unknown): number | undefined => {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 };
 
+/** Сигнал «квота исчерпана на сегодня»: не повод ждать, а повод закончить весь прогон. */
+class QuotaExhaustedError extends Error {
+  constructor(word: string, retryAfterSeconds: number) {
+    super(
+      `${word}: суточная квота поиска исчерпана (сервис просит подождать ${Math.round(retryAfterSeconds / 60)} мин) — ` +
+        "продолжать сегодня нечем",
+    );
+    this.name = "QuotaExhaustedError";
+  }
+}
+
 /**
  * Зовёт поиск с повтором на RATE_LIMITED: до трёх повторов сверх исходного
  * захода, с растущей паузой 60/180/600 секунд — или с паузой из retry_after
- * ответа, если сервис её прислал. После исчерпания повторов бросает
- * последнюю ошибку — слово считается неудачным по общим правилам.
+ * ответа, если сервис её прислал. Пауза в любом случае не превышает
+ * RATE_LIMIT_PAUSE_CAP_MS. Если retry_after сам по себе больше этого
+ * потолка — это не короткая заминка, а исчерпанная суточная квота, и
+ * повторять нет смысла: бросаем QuotaExhaustedError, не сделав ни одной
+ * попытки повтора. После исчерпания обычных повторов бросает последнюю
+ * ошибку — слово считается неудачным по общим правилам.
  */
 async function searchWithRetry(
   client: ThreadsClient,
@@ -69,10 +101,17 @@ async function searchWithRetry(
     try {
       return await client.searchPosts(word, limit);
     } catch (error) {
-      if (codeOf(error) !== "RATE_LIMITED" || retry >= RATE_LIMIT_PAUSES_MS.length) throw error;
+      if (codeOf(error) !== "RATE_LIMITED") throw error;
 
       const retryAfterSeconds = retryAfterOf(error);
-      const pauseMs = retryAfterSeconds !== undefined ? retryAfterSeconds * 1_000 : RATE_LIMIT_PAUSES_MS[retry]!;
+      if (retryAfterSeconds !== undefined && retryAfterSeconds * 1_000 > RATE_LIMIT_PAUSE_CAP_MS) {
+        throw new QuotaExhaustedError(word, retryAfterSeconds);
+      }
+
+      if (retry >= RATE_LIMIT_PAUSES_MS.length) throw error;
+
+      const wanted = retryAfterSeconds !== undefined ? retryAfterSeconds * 1_000 : RATE_LIMIT_PAUSES_MS[retry]!;
+      const pauseMs = Math.min(wanted, RATE_LIMIT_PAUSE_CAP_MS);
       log(`${word}: RATE_LIMITED, повтор через ${Math.round(pauseMs / 1_000)}с`);
       await sleep(pauseMs);
     }
@@ -171,6 +210,11 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
       db.recordRun(word, { newPosts: added }, now());
       log(`${word}: +${added} (всего ${newPosts})`);
     } catch (error) {
+      if (error instanceof QuotaExhaustedError) {
+        log(error.message);
+        return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: "rate_limited" };
+      }
+
       const code = codeOf(error);
       if (FATAL.has(code)) {
         return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: code as "NEEDS_LOGIN" | "SELECTOR_MISS" };

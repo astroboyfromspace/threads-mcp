@@ -99,6 +99,12 @@ async function main(): Promise<void> {
     }
     if (report.stoppedBy === "too_many_errors") {
       console.error("Пять слов подряд закончились ошибкой — похоже, прогон сломан (неверный токен?). Смотри лог выше.");
+      // Провал прогона не должен быть неотличим от успеха по коду выхода.
+      process.exitCode = 1;
+    }
+    if (report.stoppedBy === "rate_limited") {
+      console.error("Суточная квота поиска исчерпана — продолжать сегодня нечем. Повтори прогон завтра.");
+      process.exitCode = 1;
     }
   } finally {
     db.close();

@@ -1151,7 +1151,10 @@ git commit -m "Экспорт датасета в CSV"
 ### Задача 7: Скрипт-сборщик
 
 **Файлы:**
-- Создать: `data/queries-en.txt`
+- Создать: `src/collect/queries-en.txt`
+**Важно:** каталог `data/` целиком перечислен в `.gitignore`, поэтому список слов
+лежит в `src/collect/queries-en.txt` — рядом с кодом, который его читает.
+
 - Создать: `src/collect/runner.ts`
 - Создать: `src/collect/runner.test.ts`
 - Создать: `scripts/collect.ts`
@@ -1168,7 +1171,7 @@ git commit -m "Экспорт датасета в CSV"
 
 - [ ] **Шаг 1: Составить список слов**
 
-Создать `data/queries-en.txt` — по слову на строку, 80 штук. Слова должны быть
+Создать `src/collect/queries-en.txt` — по слову на строку, 80 штук. Слова должны быть
 частотными и нейтральными: они работают решетом, а не темой.
 
 ```
@@ -1574,7 +1577,7 @@ const client: ThreadsClient = {
   searchPosts: (query, limit) => call<{ query: string; posts: PostCardDto[] }>("search_posts", { query, limit }),
 };
 
-const wordsFile = resolve(option("queries", "data/queries-en.txt")!);
+const wordsFile = resolve(option("queries", "src/collect/queries-en.txt")!);
 const words = readFileSync(wordsFile, "utf8")
   .split("\n")
   .map((line) => line.trim())
@@ -1624,7 +1627,7 @@ db.close();
 
 ```bash
 npm run typecheck && npm test
-git add data/queries-en.txt src/collect/runner.ts src/collect/runner.test.ts scripts/collect.ts package.json
+git add src/collect/queries-en.txt src/collect/runner.ts src/collect/runner.test.ts scripts/collect.ts package.json
 git commit -m "Скрипт-сборщик датасета"
 ```
 
@@ -1715,7 +1718,7 @@ curl -X POST https://<домен>/actions/search_posts \
 
 Скрипт `scripts/collect.ts` копит посты в отдельную `var/collect.sqlite`:
 один заход в ленту плюс поиск по частотным английским словам из
-`data/queries-en.txt`.
+`src/collect/queries-en.txt`.
 
 ```bash
 npm run collect -- --target 1000      # один прогон, ~30-50 минут

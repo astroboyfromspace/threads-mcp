@@ -90,10 +90,16 @@ export function authorFromUrl(url: string | null): string | null {
   return match?.[1] ?? null;
 }
 
-/** Превращает сырьё в карточку. null — если в контейнере не было текста. */
+/**
+ * Превращает сырьё в карточку.
+ *
+ * null — только если в контейнере нет вообще ничего опознаваемого: ни
+ * текста, ни ссылки на пост. Пост без текста — законный случай (например,
+ * видео с темой, но без подписи), и терять такую карточку целиком нельзя.
+ */
 export function buildCard(raw: RawCard): PostCard | null {
   const text = raw.text.trim();
-  if (!text) return null;
+  if (!text && !raw.href) return null;
 
   const url = raw.href ? new URL(raw.href, URLS.home).toString() : null;
   const { media, mediaCount } = classifyMedia(raw.media);

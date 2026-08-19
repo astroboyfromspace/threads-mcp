@@ -104,8 +104,17 @@ describe("buildCard", () => {
     expect(card?.text).toBe("просто пост");
   });
 
-  it("пустой контейнер карточкой не считается", () => {
-    expect(buildCard({ ...RAW, text: "   " })).toBeNull();
+  it("пустой контейнер без ссылки карточкой не считается", () => {
+    expect(buildCard({ ...RAW, href: null, text: "   " })).toBeNull();
+  });
+
+  // Пост без текста, но со ссылкой — законный случай (например, видео с
+  // темой без подписи), терять его целиком нельзя.
+  it("есть ссылка, текста нет — карточка не теряется", () => {
+    const card = buildCard({ ...RAW, text: "   " });
+    expect(card).not.toBeNull();
+    expect(card?.text).toBe("");
+    expect(card?.url).toBe("https://www.threads.net/@someone/post/abc123");
   });
 
   it("не выдумывает время, когда его нет", () => {

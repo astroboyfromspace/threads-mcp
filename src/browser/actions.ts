@@ -216,7 +216,11 @@ export async function searchPosts(
 ): Promise<{ query: string; sort: "top" | "recent"; posts: FeedItem[] }> {
   return session.withPage(async (page) => {
     await open(page, SEARCH_URL(query, sort));
-    const posts = await collectPosts(page, limit, "search");
+    // Пустота для ленты и профиля подозрительна, а для поиска — законный
+    // исход: по редкому слову может не найтись ничего. Разрешаем пустой
+    // результат только здесь, чтобы такой заход не обрывал прогон сборщика
+    // фатальным SELECTOR_MISS.
+    const posts = await collectPosts(page, limit, "search", { allowEmpty: true });
     return { query, sort, posts };
   });
 }
@@ -288,7 +292,8 @@ async function collectReplies(
     for (const [index, container] of containers.entries()) {
       if (collected.size >= limit) break;
 
-      const item = await itemFrom(container);
+      const href = await container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null);
+      const item = await itemFrom(container, href);
       if (!item) continue;
 
       // Сам пост тоже лежит в контейнере поста и в ответы попасть не должен.
@@ -315,8 +320,25 @@ async function collectReplies(
   return { post, replies: [...collected.values()] };
 }
 
-async function collectPosts(page: Page, limit: number, label: string): Promise<FeedItem[]> {
+type CollectPostsOptions = {
+  /**
+   * Для ленты и профиля пустая выдача подозрительна и означает сломанный
+   * селектор. Для поиска это законный исход: по редкому слову может не
+   * найтись ничего, и обрывать прогон сборщика на этом нельзя.
+   */
+  allowEmpty?: boolean;
+};
+
+async function collectPosts(page: Page, limit: number, label: string, options: CollectPostsOptions = {}): Promise<FeedItem[]> {
   const seen = new Map<string, FeedItem>();
+  // Контейнеры, уже разобранные хоть раз, — по href пермалинка. Каждый круг
+  // скролла заново видит все контейнеры на странице, включая старые; полный
+  // разбор карточки стоит около десяти обращений к странице, и без пропуска
+  // уже обработанных на сотню постов набегают тысячи лишних round-trip —
+  // прогон дольше, а страница держится открытой заметно дольше обычного,
+  // что само по себе похоже на автоматизацию. Контейнеры без href (изредка
+  // бывают у ответов) разбираем каждый раз заново, как и раньше.
+  const parsedHrefs = new Set<string>();
   let idleRounds = 0;
 
   // Лента бесконечная и подгружается лениво, поэтому скроллим до тех пор, пока
@@ -328,8 +350,12 @@ async function collectPosts(page: Page, limit: number, label: string): Promise<F
     for (const container of containers) {
       if (seen.size >= limit) break;
 
-      const item = await itemFrom(container);
+      const href = await container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null);
+      if (href && parsedHrefs.has(href)) continue;
+
+      const item = await itemFrom(container, href);
       if (!item) continue;
+      if (href) parsedHrefs.add(href);
 
       const key = keyOf(item);
       if (seen.has(key)) continue;
@@ -343,27 +369,44 @@ async function collectPosts(page: Page, limit: number, label: string): Promise<F
   }
 
   if (seen.size === 0) {
+    if (options.allowEmpty) return [];
     await assertStillLoggedIn(page);
     return selectorMiss(page, label, "Не нашёл ни одного поста — вероятно, Threads изменил вёрстку");
   }
 
   const items = [...seen.values()];
 
-  // Пост без лайков честно даёт ноль, но чтобы у сотни постов подряд не нашлось
-  // ни одного счётчика, Threads должен переехать. Отдать в датасет страницу
-  // сплошных null — значит спрятать поломку до момента, когда по данным уже
-  // посчитают статистику. Порог в пять карточек оставлен на случай, когда
-  // выдача действительно крошечная.
-  if (items.length >= 5 && items.every((item) => item.likes === null && item.replies === null)) {
-    return selectorMiss(page, label, "Ни у одного поста не нашлось счётчиков — вероятно, Threads изменил вёрстку");
+  // Пост без лайков честно даёт ноль, но если у пяти и более карточек сразу
+  // все три счётчика — лайки, ответы, репосты — оказались нулём или пустым
+  // значением, дело не в везении с выборкой, а в переехавшей вёрстке: то ли
+  // кнопку не нашли вовсе, то ли число вынесли в соседний элемент, и
+  // parseCount честно вернул ноль на пустом месте. Отдать в датасет страницу
+  // сплошных нулей — худший исход: ошибка обнаружится через неделю, когда
+  // данные уже посчитаны.
+  const zeroOrMissing = (value: number | null) => value === null || value === 0;
+  const suspicious = items.filter(
+    (item) => zeroOrMissing(item.likes) && zeroOrMissing(item.replies) && zeroOrMissing(item.reposts),
+  ).length;
+
+  if (suspicious >= 5) {
+    return selectorMiss(
+      page,
+      label,
+      "У пяти и более постов подряд все счётчики нулевые или пустые — похоже на переехавшую вёрстку",
+    );
   }
 
   return items;
 }
 
-/** Достаёт из контейнера то, что нам нужно от поста; null — если контейнер пустой. */
-async function itemFrom(container: Locator): Promise<FeedItem | null> {
-  const href = await container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null);
+/**
+ * Достаёт из контейнера то, что нам нужно от поста; null — если контейнер пустой.
+ *
+ * href принимается уже готовым: вызывающая сторона всё равно достаёт его сама
+ * (чтобы решить, разбирать ли контейнер заново), и повторный round-trip за тем
+ * же атрибутом был бы лишним.
+ */
+async function itemFrom(container: Locator, href: string | null): Promise<FeedItem | null> {
   const text = (await container.innerText().catch(() => "")).trim();
   if (!text) return null;
 

@@ -279,6 +279,21 @@ export const actions = {
     run: (input) => browser.readProfile(input.username, input.limit),
   }),
 
+  search_posts: define({
+    name: "search_posts",
+    description:
+      "Найти посты по запросу и вернуть карточки выдачи: автор, текст, ссылка, время, счётчики и медиа. " +
+      "Сортировка recent отдаёт свежее, top — популярное. Выполняется через браузер.",
+    driver: "browser",
+    input: z.object({
+      query: z.string().trim().min(1).max(100),
+      limit: z.number().int().min(1).max(300).default(100),
+      sort: z.enum(["top", "recent"]).default("recent"),
+    }),
+    dailyLimit: () => config.limits.searchesPerDay,
+    run: (input) => browser.searchPosts(input.query, input.limit, input.sort),
+  }),
+
   check_login: define({
     name: "check_login",
     description: "Проверить, жива ли браузерная сессия Threads.",

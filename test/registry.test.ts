@@ -36,6 +36,7 @@ vi.mock("../src/browser/actions.js", () => ({
     },
   ]),
   readProfile: vi.fn(async () => ({ username: "someone", posts: [] })),
+  searchPosts: vi.fn(async () => ({ query: "today", sort: "recent", posts: [] })),
   readReplies: vi.fn(async () => ({ url: "https://www.threads.net/@someone/post/abc", post: null, replies: [] })),
 }));
 
@@ -125,6 +126,22 @@ describe("валидация входа", () => {
   it("подставляет значение по умолчанию для лимита ленты", async () => {
     await execute("read_feed", {});
     expect(browser.readFeed).toHaveBeenCalledWith(20);
+  });
+
+  it("поиск уходит в браузер и несёт запрос с сортировкой", async () => {
+    await execute("search_posts", { query: "today", limit: 50, sort: "recent" });
+
+    expect(browser.searchPosts).toHaveBeenCalledWith("today", 50, "recent");
+  });
+
+  it("по умолчанию ищет свежее, а не топ", async () => {
+    await execute("search_posts", { query: "today" });
+
+    expect(browser.searchPosts).toHaveBeenCalledWith("today", 100, "recent");
+  });
+
+  it("пустой запрос отвергает", async () => {
+    await expect(execute("search_posts", { query: "  " })).rejects.toMatchObject({ code: "INVALID_INPUT" });
   });
 });
 

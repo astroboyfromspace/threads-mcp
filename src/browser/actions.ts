@@ -202,6 +202,25 @@ export async function readProfile(username: string, limit = 20): Promise<{ usern
   });
 }
 
+/**
+ * Ищет посты по запросу и собирает выдачу скроллом.
+ *
+ * Возобновить скролл между вызовами нельзя: выдача живёт в странице, и каждый
+ * новый вызов начинает сверху. Поэтому глубина одного вызова ограничена, а
+ * объём набирается количеством разных запросов — так устроен сборщик.
+ */
+export async function searchPosts(
+  query: string,
+  limit = 100,
+  sort: "top" | "recent" = "recent",
+): Promise<{ query: string; sort: "top" | "recent"; posts: FeedItem[] }> {
+  return session.withPage(async (page) => {
+    await open(page, SEARCH_URL(query, sort));
+    const posts = await collectPosts(page, limit, "search");
+    return { query, sort, posts };
+  });
+}
+
 export type ReplyItem = FeedItem & { hidden: boolean };
 
 export type ThreadView = {

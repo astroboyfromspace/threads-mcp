@@ -56,6 +56,8 @@ export const config = {
     likesPerDay: num("LIMIT_LIKES_PER_DAY", 150),
     followsPerDay: num("LIMIT_FOLLOWS_PER_DAY", 50),
     repostsPerDay: num("LIMIT_REPOSTS_PER_DAY", 30),
+    /** Поиск агрессивнее лайков: одна выдача — это десятки экранов скролла. */
+    searchesPerDay: num("LIMIT_SEARCHES_PER_DAY", 30),
   },
 } as const;
 

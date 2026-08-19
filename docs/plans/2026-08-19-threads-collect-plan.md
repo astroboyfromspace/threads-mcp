@@ -1151,7 +1151,10 @@ git commit -m "Экспорт датасета в CSV"
 ### Задача 7: Скрипт-сборщик
 
 **Файлы:**
-- Создать: `data/queries-en.txt`
+- Создать: `src/collect/queries-en.txt`
+**Важно:** каталог `data/` целиком перечислен в `.gitignore`, поэтому список слов
+лежит в `src/collect/queries-en.txt` — рядом с кодом, который его читает.
+
 - Создать: `src/collect/runner.ts`
 - Создать: `src/collect/runner.test.ts`
 - Создать: `scripts/collect.ts`
@@ -1168,7 +1171,7 @@ git commit -m "Экспорт датасета в CSV"
 
 - [ ] **Шаг 1: Составить список слов**
 
-Создать `data/queries-en.txt` — по слову на строку, 80 штук. Слова должны быть
+Создать `src/collect/queries-en.txt` — по слову на строку, 80 штук. Слова должны быть
 частотными и нейтральными: они работают решетом, а не темой.
 
 ```
@@ -1574,7 +1577,7 @@ const client: ThreadsClient = {
   searchPosts: (query, limit) => call<{ query: string; posts: PostCardDto[] }>("search_posts", { query, limit }),
 };
 
-const wordsFile = resolve(option("queries", "data/queries-en.txt")!);
+const wordsFile = resolve(option("queries", "src/collect/queries-en.txt")!);
 const words = readFileSync(wordsFile, "utf8")
   .split("\n")
   .map((line) => line.trim())
@@ -1624,7 +1627,7 @@ db.close();
 
 ```bash
 npm run typecheck && npm test
-git add data/queries-en.txt src/collect/runner.ts src/collect/runner.test.ts scripts/collect.ts package.json
+git add src/collect/queries-en.txt src/collect/runner.ts src/collect/runner.test.ts scripts/collect.ts package.json
 git commit -m "Скрипт-сборщик датасета"
 ```
 
@@ -1660,7 +1663,23 @@ curl -s -X POST https://<домен>/actions/search_posts \
 ```
 
 Ожидание: `ok: true`, пять карточек, у каждой заполнены `url`, `author`,
-`text`. Проверить глазами три вещи:
+`text`. Проверить глазами шесть вещей — первые три нашло финальное ревью, и
+без них датасет собирать нельзя:
+
+0. **`text` — это текст поста, а не вся карточка.** Сейчас он снимается через
+   `innerText` контейнера, а тот включает ник автора, время, подписи кнопок и
+   счётчики, а у репоста — ещё и текст цитируемого поста. Если так и есть,
+   нужен селектор тела поста в `selectors.ts`: иначе загрязнена будет каждая
+   строка датасета, и любая статистика по тексту окажется мусором.
+0b. **`media` не помечает аватар как картинку поста.** Ветка «не смогли
+   определить» в `mediaOf` недостижима по построению, поэтому при расхождении
+   эвристики с вёрсткой поле молча покажет `"none"` или `"image"` у всех
+   подряд. Смотреть на посты, про которые точно известно, есть ли в них медиа.
+0c. **В `url` нет трекинговых параметров.** Сборщик режет query и hash перед
+   записью, но если полезная часть ссылки окажется в параметрах — дедуп
+   сломается. Сверить сырой `url` из ответа с тем, что легло в базу.
+
+Дальше — то, что проверялось изначально:
 
 1. `publishedAt` — не `null` (иначе не сошёлся `POST_TIME`);
 2. `likes` и `replies` — числа, а не сплошные `null` (иначе не сошлись
@@ -1685,6 +1704,11 @@ DATA_DIR=./var npm run collect -- --target 30 --limit 10
 
 Ожидание: в логе видны заходы по словам с приростом, в конце — сводка. Прогон
 занимает несколько минут.
+
+Заодно замерить время: оценка «~30-50 минут на прогон» в README взята из
+головы и живым запуском не подтверждалась. Разбор карточки стоит около десяти
+обращений к странице, так что оценка может оказаться заниженной — тогда
+поправить README по факту.
 
 - [ ] **Шаг 5: Проверить выгрузку**
 
@@ -1715,7 +1739,7 @@ curl -X POST https://<домен>/actions/search_posts \
 
 Скрипт `scripts/collect.ts` копит посты в отдельную `var/collect.sqlite`:
 один заход в ленту плюс поиск по частотным английским словам из
-`data/queries-en.txt`.
+`src/collect/queries-en.txt`.
 
 ```bash
 npm run collect -- --target 1000      # один прогон, ~30-50 минут

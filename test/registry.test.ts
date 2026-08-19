@@ -22,8 +22,21 @@ vi.mock("../src/browser/actions.js", () => ({
   unfollowUser: vi.fn(async () => ({ changed: true })),
   repost: vi.fn(async () => ({ changed: true })),
   removeRepost: vi.fn(async () => ({ changed: true })),
-  readFeed: vi.fn(async () => [{ author: "someone", url: null, text: "пост" }]),
+  readFeed: vi.fn(async () => [
+    {
+      author: "someone",
+      url: null,
+      text: "пост",
+      publishedAt: null,
+      likes: 0,
+      replies: 0,
+      reposts: 0,
+      media: "none",
+      mediaCount: 0,
+    },
+  ]),
   readProfile: vi.fn(async () => ({ username: "someone", posts: [] })),
+  searchPosts: vi.fn(async () => ({ query: "today", sort: "recent", posts: [] })),
   readReplies: vi.fn(async () => ({ url: "https://www.threads.net/@someone/post/abc", post: null, replies: [] })),
 }));
 
@@ -114,6 +127,22 @@ describe("валидация входа", () => {
     await execute("read_feed", {});
     expect(browser.readFeed).toHaveBeenCalledWith(20);
   });
+
+  it("поиск уходит в браузер и несёт запрос с сортировкой", async () => {
+    await execute("search_posts", { query: "today", limit: 50, sort: "recent" });
+
+    expect(browser.searchPosts).toHaveBeenCalledWith("today", 50, "recent");
+  });
+
+  it("по умолчанию ищет свежее, а не топ", async () => {
+    await execute("search_posts", { query: "today" });
+
+    expect(browser.searchPosts).toHaveBeenCalledWith("today", 100, "recent");
+  });
+
+  it("пустой запрос отвергает", async () => {
+    await expect(execute("search_posts", { query: "  " })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
 });
 
 describe("суточные лимиты браузерных действий", () => {
@@ -173,6 +202,134 @@ describe("журнал действий", () => {
       )
       .get();
     expect(row).toMatchObject({ error_code: "INVALID_INPUT", ok: 0 });
+  });
+
+  // Сборщик датасета намеренно не трогает сервисную БД, но журнал живёт в
+  // ней же: каждый search_posts кладёт туда сотню карточек с текстами, если
+  // писать результат целиком. За десяток прогонов это десятки мегабайт дубля
+  // датасета и нечитаемый журнал.
+  it("для читалок пишет короткую сводку, а не результат целиком", async () => {
+    vi.mocked(browser.searchPosts).mockResolvedValueOnce({
+      query: "today",
+      sort: "recent",
+      posts: [
+        {
+          author: "a",
+          url: "https://t/1",
+          text: "первый пост с длинным текстом",
+          publishedAt: null,
+          likes: 1,
+          replies: 0,
+          reposts: 0,
+          media: "none",
+          mediaCount: 0,
+        },
+        {
+          author: "b",
+          url: "https://t/2",
+          text: "второй пост",
+          publishedAt: null,
+          likes: 0,
+          replies: 0,
+          reposts: 0,
+          media: "none",
+          mediaCount: 0,
+        },
+      ],
+    });
+
+    await execute("search_posts", { query: "today" });
+
+    const row = getDb()
+      .prepare<[], { result: string }>("SELECT result FROM action_log WHERE action = 'search_posts' ORDER BY id DESC LIMIT 1")
+      .get();
+    const logged = JSON.parse(row!.result) as unknown;
+    expect(logged).toEqual({ count: 2 });
+    expect(row!.result).not.toContain("второй пост");
+  });
+
+  it("для действий-читалок массивом (лента) тоже пишет сводку", async () => {
+    await execute("read_feed", {});
+
+    const row = getDb()
+      .prepare<[], { result: string }>("SELECT result FROM action_log WHERE action = 'read_feed' ORDER BY id DESC LIMIT 1")
+      .get();
+    expect(JSON.parse(row!.result)).toEqual({ count: 1 });
+  });
+
+  it("для read_profile тоже пишет сводку — по вложенному posts, а не результат целиком", async () => {
+    vi.mocked(browser.readProfile).mockResolvedValueOnce({
+      username: "someone",
+      posts: [
+        {
+          author: "someone",
+          url: "https://t/1",
+          text: "пост профиля с длинным текстом",
+          publishedAt: null,
+          likes: 0,
+          replies: 0,
+          reposts: 0,
+          media: "none",
+          mediaCount: 0,
+        },
+      ],
+    });
+
+    await execute("read_profile", { username: "someone" });
+
+    const row = getDb()
+      .prepare<[], { result: string }>("SELECT result FROM action_log WHERE action = 'read_profile' ORDER BY id DESC LIMIT 1")
+      .get();
+    expect(JSON.parse(row!.result)).toEqual({ count: 1 });
+    expect(row!.result).not.toContain("пост профиля");
+  });
+
+  it("для read_replies тоже пишет сводку — по вложенному replies, а не результат целиком", async () => {
+    vi.mocked(browser.readReplies).mockResolvedValueOnce({
+      url: "https://www.threads.net/@someone/post/abc",
+      post: {
+        author: "someone",
+        url: "https://www.threads.net/@someone/post/abc",
+        text: "исходный пост",
+        publishedAt: null,
+        likes: 0,
+        replies: 1,
+        reposts: 0,
+        media: "none",
+        mediaCount: 0,
+      },
+      replies: [
+        {
+          author: "other",
+          url: "https://t/reply-1",
+          text: "длинный текст ответа",
+          publishedAt: null,
+          likes: 0,
+          replies: 0,
+          reposts: 0,
+          media: "none",
+          mediaCount: 0,
+          hidden: false,
+        },
+      ],
+    });
+
+    await execute("read_replies", { url: "https://www.threads.net/@someone/post/abc" });
+
+    const row = getDb()
+      .prepare<[], { result: string }>("SELECT result FROM action_log WHERE action = 'read_replies' ORDER BY id DESC LIMIT 1")
+      .get();
+    expect(JSON.parse(row!.result)).toEqual({ count: 1, hasPost: true });
+    expect(row!.result).not.toContain("длинный текст ответа");
+  });
+
+  it("для остальных действий журналирует результат как есть", async () => {
+    await execute("publish_post", { text: "как есть" });
+
+    const row = getDb()
+      .prepare<[], { result: string }>("SELECT result FROM action_log WHERE action = 'publish_post' ORDER BY id DESC LIMIT 1")
+      .get();
+    expect(JSON.parse(row!.result)).toEqual({ id: "graph-post" });
   });
 });
 

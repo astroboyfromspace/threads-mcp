@@ -279,6 +279,21 @@ export const actions = {
     run: (input) => browser.readProfile(input.username, input.limit),
   }),
 
+  search_posts: define({
+    name: "search_posts",
+    description:
+      "Найти посты по запросу и вернуть карточки выдачи: автор, текст, ссылка, время, счётчики и медиа. " +
+      "Сортировка recent отдаёт свежее, top — популярное. Выполняется через браузер.",
+    driver: "browser",
+    input: z.object({
+      query: z.string().trim().min(1).max(100),
+      limit: z.number().int().min(1).max(300).default(100),
+      sort: z.enum(["top", "recent"]).default("recent"),
+    }),
+    dailyLimit: () => config.limits.searchesPerDay,
+    run: (input) => browser.searchPosts(input.query, input.limit, input.sort),
+  }),
+
   check_login: define({
     name: "check_login",
     description: "Проверить, жива ли браузерная сессия Threads.",
@@ -296,6 +311,27 @@ export type ActionName = keyof typeof actions;
 
 export function isActionName(name: string): name is ActionName {
   return Object.hasOwn(actions, name);
+}
+
+/**
+ * Действия-читалки: результат может нести сотню карточек постов с текстами.
+ * Журнал действий живёт в сервисной БД, которую сборщик датасета намеренно
+ * не трогает, — а полный результат в журнале за десяток прогонов превращает
+ * этот файл в дубль датасета на десятки мегабайт и делает журнал нечитаемым.
+ */
+const READER_ACTIONS: ReadonlySet<ActionName> = new Set(["read_feed", "read_profile", "read_replies", "search_posts"]);
+
+/** Короткая сводка вместо полного результата читалки: сколько элементов вернулось. */
+function summarizeReaderResult(result: unknown): unknown {
+  if (Array.isArray(result)) return { count: result.length };
+
+  if (result && typeof result === "object") {
+    const value = result as Record<string, unknown>;
+    if (Array.isArray(value.posts)) return { count: value.posts.length };
+    if (Array.isArray(value.replies)) return { count: value.replies.length, hasPost: value.post != null };
+  }
+
+  return { count: null };
 }
 
 /**
@@ -322,7 +358,8 @@ export async function execute(name: ActionName, rawInput: unknown): Promise<unkn
     }
 
     const result = await action.run(parsed.data);
-    logAction({ action: name, driver: action.driver, ok: true, input: parsed.data, result });
+    const loggedResult = READER_ACTIONS.has(name) ? summarizeReaderResult(result) : result;
+    logAction({ action: name, driver: action.driver, ok: true, input: parsed.data, result: loggedResult });
     return result;
   } catch (err) {
     const code = err instanceof ActionError ? err.code : "INTERNAL";

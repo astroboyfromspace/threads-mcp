@@ -1,6 +1,18 @@
 import type { Locator, Page } from "playwright";
 import { ActionError } from "../errors.js";
-import { BUTTON_LABELS, LOGGED_OUT_HINTS, POST_CONTAINER, POST_PERMALINK, URLS } from "./selectors.js";
+import { buildCard, countMedia, type PostCard } from "./cards.js";
+import {
+  BUTTON_LABELS,
+  LOGGED_OUT_HINTS,
+  POST_CONTAINER,
+  POST_MEDIA,
+  POST_PERMALINK,
+  POST_TEXT_EXCLUDE,
+  POST_TEXT_SPAN,
+  POST_TIME,
+  SEARCH_URL,
+  URLS,
+} from "./selectors.js";
 import { captureFailure, humanDelay, session } from "./session.js";
 
 /** Ищет элемент нужной роли по любой из подписей (интерфейс может быть на русском или английском). */
@@ -181,11 +193,9 @@ export async function unfollowUser(username: string): Promise<{ changed: boolean
   });
 }
 
-export type FeedItem = {
-  author: string | null;
-  url: string | null;
-  text: string;
-};
+// Историческое имя оставлено, чтобы не трогать сигнатуры действий: форма
+// карточки одна и та же и в ленте, и в поиске, и в ответах.
+export type FeedItem = PostCard;
 
 /** Читает ленту, подгружая её скроллом, пока не наберётся нужное число постов. */
 export async function readFeed(limit = 20): Promise<FeedItem[]> {
@@ -200,6 +210,29 @@ export async function readProfile(username: string, limit = 20): Promise<{ usern
     await open(page, URLS.profile(username));
     const posts = await collectPosts(page, limit, "profile");
     return { username: username.replace(/^@/, ""), posts };
+  });
+}
+
+/**
+ * Ищет посты по запросу и собирает выдачу скроллом.
+ *
+ * Возобновить скролл между вызовами нельзя: выдача живёт в странице, и каждый
+ * новый вызов начинает сверху. Поэтому глубина одного вызова ограничена, а
+ * объём набирается количеством разных запросов — так устроен сборщик.
+ */
+export async function searchPosts(
+  query: string,
+  limit = 100,
+  sort: "top" | "recent" = "recent",
+): Promise<{ query: string; sort: "top" | "recent"; posts: FeedItem[] }> {
+  return session.withPage(async (page) => {
+    await open(page, SEARCH_URL(query, sort));
+    // Пустота для ленты и профиля подозрительна, а для поиска — законный
+    // исход: по редкому слову может не найтись ничего. Разрешаем пустой
+    // результат только здесь, чтобы такой заход не обрывал прогон сборщика
+    // фатальным SELECTOR_MISS.
+    const posts = await collectPosts(page, limit, "search", { allowEmpty: true });
+    return { query, sort, posts };
   });
 }
 
@@ -270,7 +303,8 @@ async function collectReplies(
     for (const [index, container] of containers.entries()) {
       if (collected.size >= limit) break;
 
-      const item = await itemFrom(container);
+      const href = await container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null);
+      const item = await itemFrom(container, href);
       if (!item) continue;
 
       // Сам пост тоже лежит в контейнере поста и в ответы попасть не должен.
@@ -297,8 +331,25 @@ async function collectReplies(
   return { post, replies: [...collected.values()] };
 }
 
-async function collectPosts(page: Page, limit: number, label: string): Promise<FeedItem[]> {
+type CollectPostsOptions = {
+  /**
+   * Для ленты и профиля пустая выдача подозрительна и означает сломанный
+   * селектор. Для поиска это законный исход: по редкому слову может не
+   * найтись ничего, и обрывать прогон сборщика на этом нельзя.
+   */
+  allowEmpty?: boolean;
+};
+
+async function collectPosts(page: Page, limit: number, label: string, options: CollectPostsOptions = {}): Promise<FeedItem[]> {
   const seen = new Map<string, FeedItem>();
+  // Контейнеры, уже разобранные хоть раз, — по href пермалинка. Каждый круг
+  // скролла заново видит все контейнеры на странице, включая старые; полный
+  // разбор карточки стоит около десяти обращений к странице, и без пропуска
+  // уже обработанных на сотню постов набегают тысячи лишних round-trip —
+  // прогон дольше, а страница держится открытой заметно дольше обычного,
+  // что само по себе похоже на автоматизацию. Контейнеры без href (изредка
+  // бывают у ответов) разбираем каждый раз заново, как и раньше.
+  const parsedHrefs = new Set<string>();
   let idleRounds = 0;
 
   // Лента бесконечная и подгружается лениво, поэтому скроллим до тех пор, пока
@@ -310,8 +361,12 @@ async function collectPosts(page: Page, limit: number, label: string): Promise<F
     for (const container of containers) {
       if (seen.size >= limit) break;
 
-      const item = await itemFrom(container);
+      const href = await container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null);
+      if (href && parsedHrefs.has(href)) continue;
+
+      const item = await itemFrom(container, href);
       if (!item) continue;
+      if (href) parsedHrefs.add(href);
 
       const key = keyOf(item);
       if (seen.has(key)) continue;
@@ -325,21 +380,161 @@ async function collectPosts(page: Page, limit: number, label: string): Promise<F
   }
 
   if (seen.size === 0) {
+    if (options.allowEmpty) return [];
     await assertStillLoggedIn(page);
     return selectorMiss(page, label, "Не нашёл ни одного поста — вероятно, Threads изменил вёрстку");
   }
 
-  return [...seen.values()];
+  const items = [...seen.values()];
+
+  // Пост без лайков честно даёт ноль — это нормально и ожидаемо, и у ленты
+  // малоактивного аккаунта или у профиля с редкими реакциями пять таких
+  // постов подряд не редкость, а обычное дело. Ложное падение на законной
+  // выдаче хуже пропущенного переезда вёрстки: оно ломает работу каждый
+  // день, а переезд вёрстки ловится живой проверкой. Поэтому падаем только
+  // когда счётчика не нашлось вовсе ни у одной карточки — все три значения
+  // именно null у всех подряд, а не когда они честно нулевые.
+  if (items.length >= 5 && items.every((item) => item.likes === null && item.replies === null && item.reposts === null)) {
+    return selectorMiss(page, label, "Ни у одного поста не нашлось ни одного счётчика — вероятно, Threads изменил вёрстку");
+  }
+
+  return items;
 }
 
-/** Достаёт из контейнера то, что нам нужно от поста; null — если контейнер пустой. */
-async function itemFrom(container: Locator): Promise<FeedItem | null> {
-  const href = await container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null);
-  const text = (await container.innerText().catch(() => "")).trim();
-  if (!text) return null;
+/**
+ * Достаёт из контейнера то, что нам нужно от поста; null — если контейнер
+ * пустой: нет ни текста, ни ссылки на пост. Пост без текста (например, видео
+ * с темой без подписи) — законный случай, его отбрасывать нельзя; этим же
+ * правилом руководствуется buildCard в cards.ts, здесь — только ранний выход,
+ * чтобы не делать лишних round-trip за датой и счётчиками для пустых карточек.
+ *
+ * href принимается уже готовым: вызывающая сторона всё равно достаёт его сама
+ * (чтобы решить, разбирать ли контейнер заново), и повторный round-trip за тем
+ * же атрибутом был бы лишним.
+ */
+async function itemFrom(container: Locator, href: string | null): Promise<FeedItem | null> {
+  const text = await textOf(container);
+  if (!text && !href) return null;
 
-  const url = href ? new URL(href, URLS.home).toString() : null;
-  return { author: authorFromUrl(url), url, text };
+  const datetime = await container.locator(POST_TIME).first().getAttribute("datetime").catch(() => null);
+
+  return buildCard({
+    href,
+    text,
+    datetime,
+    likeLabel: await labelOf(container, [...BUTTON_LABELS.like, ...BUTTON_LABELS.unlike]),
+    replyLabel: await labelOf(container, BUTTON_LABELS.reply),
+    repostLabel: await labelOf(container, BUTTON_LABELS.repost),
+    media: await mediaOf(container),
+  });
+}
+
+/** Возвращается, когда кнопка найдена, но ни текст, ни aria-label числа не несут — законный ноль, а не «не нашли». */
+const FOUND_EMPTY_LABEL = "0";
+
+/**
+ * Подпись первой подходящей кнопки внутри карточки.
+ *
+ * null — кнопка не нашлась вообще; это отличие важно: на нём стоит страж
+ * сломанной вёрстки в collectPosts, который должен падать только когда
+ * счётчика не нашлось вовсе, а не когда он честно нулевой.
+ *
+ * Число Threads рисует текстом внутри кнопки, а не в aria-label: атрибут
+ * держит неизменный глагол («Like», «Repost») без счётчика, поэтому в
+ * приоритете содержимое, атрибут — запасной источник. У поста без лайков
+ * текст внутри кнопки пустой — это законный ноль: кнопка найдена, просто
+ * подписывать нечем, и возвращать null здесь означало бы путать его с
+ * ненайденной кнопкой.
+ */
+async function labelOf(container: Locator, labels: readonly RegExp[]): Promise<string | null> {
+  const button = buttonByLabels(container, labels).first();
+  if ((await button.count().catch(() => 0)) === 0) return null;
+
+  const text = await button.innerText().catch(() => "");
+  if (text.trim()) return text;
+
+  const aria = await button.getAttribute("aria-label").catch(() => null);
+  if (aria?.trim()) return aria;
+
+  return FOUND_EMPTY_LABEL;
+}
+
+/**
+ * Снимает с карточки сырые прямоугольники картинок и видео и отдаёт их в
+ * countMedia() (cards.ts) — чистую функцию, которую можно проверить тестами
+ * без браузера. Здесь, в браузерном слое, только сбор: подпись и геометрия
+ * (getBoundingClientRect) недоступны локатором без похода в браузер за
+ * каждой картинкой отдельно, поэтому — один evaluate.
+ *
+ * Картинка-кандидат — та, чей alt не похож на подпись аватара (см.
+ * POST_MEDIA.avatarAltPattern). Для каждой такой картинки берём прямоугольник
+ * или null, если размер получить не удалось (ширина 0 — так бывает у ещё не
+ * отрисованных лениво картинок); дальше решение за countMedia().
+ */
+async function mediaOf(container: Locator): Promise<{ images: number; videos: number } | null> {
+  try {
+    const raw = await container.evaluate((el, { image, video, avatarAltPattern }) => {
+      const avatarAlt = new RegExp(avatarAltPattern, "i");
+
+      // Проект собирается без lib "dom" (Node-код), поэтому DOM-типы внутри
+      // browser-колбэка не видны tsc — приводим через any, код всё равно
+      // выполняется в браузере Playwright, а не проверяется здесь по типам.
+      const rectOf = (node: any): { width: number; height: number } | null => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 ? { width: rect.width, height: rect.height } : null;
+      };
+
+      const imgs = Array.from(el.querySelectorAll(image)) as any[];
+      const candidates = imgs.filter((img) => !avatarAlt.test(img.alt || ""));
+
+      const videos = (Array.from(el.querySelectorAll(video)) as any[])
+        .map(rectOf)
+        .filter((rect): rect is { width: number; height: number } => rect !== null);
+
+      return { images: candidates.map(rectOf), videos };
+    }, POST_MEDIA);
+
+    return countMedia(raw.images, raw.videos, { minWidth: POST_MEDIA.minWidth, tolerance: POST_MEDIA.sizeTolerance });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Тело поста — самый длинный span[dir="auto"] внутри карточки без предка-
+ * ссылки и предка-кнопки, см. POST_TEXT_SPAN и POST_TEXT_EXCLUDE в
+ * selectors.ts. Обход — через evaluate: правило про предков нельзя выразить
+ * локатором Playwright, а обходить каждый span отдельным round-trip дорого.
+ *
+ * closest() не годится напрямую: если саму карточку когда-нибудь завернут в
+ * ссылку целиком, он найдёт предка-ссылку и снаружи контейнера. Поэтому
+ * поднимаемся вручную и останавливаемся на границе контейнера.
+ */
+async function textOf(container: Locator): Promise<string> {
+  return container.evaluate((el, { spanSelector, excludeSelector }) => {
+    // Тот же повод для any, что и в mediaOf выше: DOM-типы недоступны tsc в
+    // Node-конфигурации проекта, а сам код выполняется в браузере.
+    const spans = Array.from(el.querySelectorAll(spanSelector)) as any[];
+    let longest = "";
+
+    for (const span of spans) {
+      let node: any = span;
+      let excluded = false;
+      while (node && node !== el) {
+        if (node.matches(excludeSelector)) {
+          excluded = true;
+          break;
+        }
+        node = node.parentElement;
+      }
+      if (excluded) continue;
+
+      const value = (span.textContent ?? "").trim();
+      if (value.length > longest.length) longest = value;
+    }
+
+    return longest;
+  }, { spanSelector: POST_TEXT_SPAN, excludeSelector: POST_TEXT_EXCLUDE });
 }
 
 /** Ключ для отсева повторов: ответ может быть и без пермалинка, тогда опознаём по тексту. */
@@ -357,10 +552,4 @@ async function assertStillLoggedIn(page: Page): Promise<void> {
     session.markLoggedOut();
     throw new ActionError("NEEDS_LOGIN", "Threads показывает страницу для незалогиненных", { retryable: false });
   }
-}
-
-function authorFromUrl(url: string | null): string | null {
-  if (!url) return null;
-  const match = /\/@([^/]+)\/post\//.exec(url);
-  return match?.[1] ?? null;
 }

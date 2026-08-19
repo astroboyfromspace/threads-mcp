@@ -106,4 +106,15 @@ describe("runCollection", () => {
     expect(report.stoppedBy).toBe("queries_exhausted");
     expect(client.searchPosts).toHaveBeenCalledTimes(3);
   });
+
+  // Пауза нужна между запросами, а не после последнего — ждать перед выходом незачем.
+  it("не спит после последнего слова", async () => {
+    const client = fakeClient(1);
+    const sleep = vi.fn(async () => {});
+
+    const report = await runCollection({ db, client, sleep }, { target: 1000, limit: 1 });
+
+    expect(report.stoppedBy).toBe("queries_exhausted");
+    expect(sleep).toHaveBeenCalledTimes(client.searchPosts.mock.calls.length - 1);
+  });
 });

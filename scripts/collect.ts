@@ -39,6 +39,7 @@ const baseUrl = process.env.THREADS_API_URL ?? "http://127.0.0.1:8080";
 const token = process.env.API_TOKEN;
 if (!token) {
   console.error("Не задан API_TOKEN — сервис не пустит.");
+  db.close();
   process.exit(1);
 }
 

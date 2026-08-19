@@ -78,7 +78,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
   // должен, иначе одно и то же слово может попасться дважды.
   const words = db.nextQueries(1_000);
 
-  for (const word of words) {
+  for (const [index, word] of words.entries()) {
     try {
       const found = await client.searchPosts(word, options.limit);
       const stored = found.posts
@@ -106,7 +106,9 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
     }
 
     // Пауза между запросами, а не после последнего: ждать перед выходом незачем.
-    await sleep(5_000 + Math.floor(Math.random() * 10_000));
+    if (index < words.length - 1) {
+      await sleep(5_000 + Math.floor(Math.random() * 10_000));
+    }
   }
 
   return { newPosts, queriesUsed, errors, stoppedBy: "queries_exhausted" };

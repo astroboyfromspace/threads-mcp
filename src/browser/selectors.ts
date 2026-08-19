@@ -37,6 +37,10 @@ export const BUTTON_LABELS = {
   removeRepost: [/^удалить репост/i, /^убрать репост/i, /^remove repost/i, /^undo repost/i, /^remove/i],
   confirmRepost: [/^репост/i, /^repost/i],
   confirmUnfollow: [/^отписаться/i, /^unfollow/i],
+  // Кнопка ответов в карточке поста — своей подписи в BUTTON_LABELS не было,
+  // подписи лежали прямо в actions.ts, хотя весь смысл этого файла в том,
+  // чтобы зацепки за вёрстку жили в одном месте.
+  reply: [/^ответ/i, /^reply/i, /^comment/i],
 } as const;
 
 /**

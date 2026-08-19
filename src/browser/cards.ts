@@ -35,12 +35,14 @@ export function parseCount(label: string | null): number | null {
   if (scale === 1) {
     // Без суффикса точка, запятая и пробел разделяют тысячи: «1,234» — это 1234.
     const value = Number(digits.replace(/[., \s]/g, ""));
-    return Number.isFinite(value) ? value : 0;
+    // Регэксп нашёл что-то похожее на число, но Number() его не разобрал —
+    // выдуманный ноль здесь хуже пустого значения: он молча соврёт в датасет.
+    return Number.isFinite(value) ? value : null;
   }
 
   // С суффиксом тот же знак — уже десятичный: «1,2 тыс.» — это 1200.
   const value = Number(digits.replace(/[ \s]/g, "").replace(",", "."));
-  return Number.isFinite(value) ? Math.round(value * scale) : 0;
+  return Number.isFinite(value) ? Math.round(value * scale) : null;
 }
 
 /** Сводит счёт картинок и видео к одному признаку. null на входе — «определить не смогли». */

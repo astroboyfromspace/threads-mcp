@@ -213,6 +213,35 @@ describe("runCollection", () => {
   // Разные показы одной и той же карточки несут разные трекинговые параметры —
   // без нормализации ссылки дедуп по PRIMARY KEY не срабатывает и пост
   // ложится несколькими строками.
+  // Раньше карточки без ссылки терялись беззвучно: отчёт вообще не знал об
+  // их существовании.
+  // Лог ленты должен показывать именно то, что добавила лента, а не
+  // накопленный newPosts, — иначе при любой перестановке шагов лог начнёт
+  // врать.
+  it("лог ленты показывает локально добавленное, а не накопленный счёт", async () => {
+    const client = fakeClient(3);
+    const messages: string[] = [];
+
+    await runCollection({ db, client, sleep: async () => {}, log: (m) => messages.push(m) }, { target: 3, limit: 3 });
+
+    expect(messages[0]).toBe("лента: +3");
+  });
+
+  it("считает и показывает в отчёте посты без ссылки", async () => {
+    const client = fakeClient(0);
+    client.readFeed = vi.fn(async () => [{ ...card("https://t/feed-1") }, { ...card("https://t/feed-1"), url: null }]);
+    client.searchPosts = vi.fn(async (query: string) => ({
+      query,
+      posts: [{ ...card("https://t/1"), url: null }, { ...card("https://t/2") }],
+    }));
+
+    const report = await runCollection({ db, client, sleep: async () => {} }, { target: 1000, limit: 2 });
+
+    // Один без ссылки в ленте плюс по одному без ссылки на каждое из трёх
+    // слов ротации ("a", "b", "c").
+    expect(report.droppedNoUrl).toBe(1 + 3);
+  });
+
   it("нормализует ссылку перед дедупом — трекинговые параметры не создают дубль", async () => {
     const client = fakeClient(0);
     client.searchPosts = vi.fn(async (query: string) => ({

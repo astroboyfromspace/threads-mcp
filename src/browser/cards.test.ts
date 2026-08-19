@@ -34,6 +34,14 @@ describe("parseCount", () => {
     expect(parseCount(null)).toBeNull();
     expect(parseCount("   ")).toBeNull();
   });
+
+  // Регэксп нашёл что-то похожее на число, но Number() его не разобрал —
+  // выдуманный ноль тут хуже пустого значения: он молча соврёт в датасет.
+  it("нераспознанное число — null, а не ноль", () => {
+    // Несколько точек в дробной части — Number() не разбирает такую строку,
+    // а регэксп её уже принял как число.
+    expect(parseCount("Like 1.2.3K")).toBeNull();
+  });
 });
 
 describe("classifyMedia", () => {

@@ -18,6 +18,8 @@ export type CollectionReport = {
   newPosts: number;
   queriesUsed: number;
   errors: number;
+  /** Карточки без разбираемой ссылки — не попали в базу, потому что дедуп опирается на url как на ключ. */
+  droppedNoUrl: number;
   stoppedBy: "target_reached" | "queries_exhausted" | "NEEDS_LOGIN" | "SELECTOR_MISS" | "too_many_errors";
 };
 
@@ -101,6 +103,22 @@ function toStored(card: PostCardDto, source: "search" | "feed", foundBy: string 
   return { ...card, url, source, foundBy };
 }
 
+/** Отделяет карточки без разбираемой ссылки, чтобы их не терять беззвучно — отчёт о них знает. */
+function splitStored(
+  cards: PostCardDto[],
+  source: "search" | "feed",
+  foundBy: string | null,
+): { stored: CollectedPost[]; droppedNoUrl: number } {
+  const stored: CollectedPost[] = [];
+  let droppedNoUrl = 0;
+  for (const card of cards) {
+    const post = toStored(card, source, foundBy);
+    if (post) stored.push(post);
+    else droppedNoUrl += 1;
+  }
+  return { stored, droppedNoUrl };
+}
+
 export async function runCollection(deps: Deps, options: Options): Promise<CollectionReport> {
   const { db, client, sleep } = deps;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
@@ -109,23 +127,26 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
   let newPosts = 0;
   let errors = 0;
   let queriesUsed = 0;
+  let droppedNoUrl = 0;
 
   // Лента идёт первой и ровно одним заходом. Она персонализирована, и при
   // большом объёме заполнила бы датасет десятком одних и тех же авторов.
   try {
     const feed = await client.readFeed(options.limit);
-    const stored = feed.map((card) => toStored(card, "feed", null)).filter((post): post is CollectedPost => post !== null);
-    newPosts += db.insertPosts(stored, now());
-    log(`лента: +${newPosts}`);
+    const { stored, droppedNoUrl: feedDropped } = splitStored(feed, "feed", null);
+    const added = db.insertPosts(stored, now());
+    newPosts += added;
+    droppedNoUrl += feedDropped;
+    log(`лента: +${added}`);
   } catch (error) {
     const code = codeOf(error);
-    if (FATAL.has(code)) return { newPosts, queriesUsed, errors, stoppedBy: code as "NEEDS_LOGIN" };
+    if (FATAL.has(code)) return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: code as "NEEDS_LOGIN" };
     errors += 1;
     log(`лента: ошибка ${code}`);
   }
 
   if (newPosts >= options.target) {
-    return { newPosts, queriesUsed, errors, stoppedBy: "target_reached" };
+    return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: "target_reached" };
   }
 
   // Берём все слова разом в порядке ротации: внутри прогона порядок меняться не
@@ -140,12 +161,11 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
   for (const [index, word] of words.entries()) {
     try {
       const found = await searchWithRetry(client, word, options.limit, sleep, log);
-      const stored = found.posts
-        .map((card) => toStored(card, "search", word))
-        .filter((post): post is CollectedPost => post !== null);
+      const { stored, droppedNoUrl: wordDropped } = splitStored(found.posts, "search", word);
 
       const added = db.insertPosts(stored, now());
       newPosts += added;
+      droppedNoUrl += wordDropped;
       queriesUsed += 1;
       consecutiveErrors = 0;
       db.recordRun(word, { newPosts: added }, now());
@@ -153,7 +173,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
     } catch (error) {
       const code = codeOf(error);
       if (FATAL.has(code)) {
-        return { newPosts, queriesUsed, errors, stoppedBy: code as "NEEDS_LOGIN" | "SELECTOR_MISS" };
+        return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: code as "NEEDS_LOGIN" | "SELECTOR_MISS" };
       }
       errors += 1;
       queriesUsed += 1;
@@ -164,12 +184,12 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
       log(`${word}: ошибка ${code}`);
 
       if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-        return { newPosts, queriesUsed, errors, stoppedBy: "too_many_errors" };
+        return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: "too_many_errors" };
       }
     }
 
     if (newPosts >= options.target) {
-      return { newPosts, queriesUsed, errors, stoppedBy: "target_reached" };
+      return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: "target_reached" };
     }
 
     // Пауза между запросами, а не после последнего: ждать перед выходом незачем.
@@ -178,5 +198,5 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
     }
   }
 
-  return { newPosts, queriesUsed, errors, stoppedBy: "queries_exhausted" };
+  return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: "queries_exhausted" };
 }

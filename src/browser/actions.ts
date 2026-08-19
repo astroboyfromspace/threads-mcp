@@ -417,7 +417,7 @@ async function itemFrom(container: Locator, href: string | null): Promise<FeedIt
     text,
     datetime,
     likeLabel: await labelOf(container, [...BUTTON_LABELS.like, ...BUTTON_LABELS.unlike]),
-    replyLabel: await labelOf(container, [/^ответ/i, /^reply/i, /^comment/i]),
+    replyLabel: await labelOf(container, BUTTON_LABELS.reply),
     repostLabel: await labelOf(container, BUTTON_LABELS.repost),
     media: await mediaOf(container),
   });

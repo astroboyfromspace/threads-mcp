@@ -87,7 +87,8 @@ async function main(): Promise<void> {
 
     console.log(
       `Готово: +${report.newPosts} новых, запросов ${report.queriesUsed}, ошибок ${report.errors}, ` +
-        `остановка — ${report.stoppedBy}. Всего в базе ${db.totalPosts()}.`,
+        `без ссылки отброшено ${report.droppedNoUrl}, остановка — ${report.stoppedBy}. ` +
+        `Всего в базе ${db.totalPosts()}.`,
     );
 
     if (report.stoppedBy === "NEEDS_LOGIN") {

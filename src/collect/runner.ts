@@ -25,6 +25,7 @@ export type CollectionReport = {
     | "queries_exhausted"
     | "NEEDS_LOGIN"
     | "SELECTOR_MISS"
+    | "UNAUTHORIZED"
     | "too_many_errors"
     | "rate_limited";
 };
@@ -265,6 +266,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
   } catch (error) {
     const code = codeOf(error);
     if (FATAL.has(code)) return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: code as "NEEDS_LOGIN" };
+
     errors += 1;
     log(`лента: ошибка ${code}${messageOf(error)}`);
   }
@@ -311,7 +313,13 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
 
       const code = codeOf(error);
       if (FATAL.has(code)) {
-        return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: code as "NEEDS_LOGIN" | "SELECTOR_MISS" };
+        return {
+          newPosts,
+          queriesUsed,
+          errors,
+          droppedNoUrl,
+          stoppedBy: code as "NEEDS_LOGIN" | "SELECTOR_MISS" | "UNAUTHORIZED",
+        };
       }
       errors += 1;
       queriesUsed += 1;

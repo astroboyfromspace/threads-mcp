@@ -130,6 +130,10 @@ async function main(): Promise<void> {
     if (report.stoppedBy === "NEEDS_LOGIN") {
       console.error("Сессия Threads истекла — нужен ручной вход через noVNC, см. README.");
     }
+    if (report.stoppedBy === "UNAUTHORIZED") {
+      console.error("Сервис не принял токен — проверь API_TOKEN в .env.");
+      process.exitCode = 1;
+    }
     if (report.stoppedBy === "SELECTOR_MISS") {
       console.error("Threads изменил вёрстку — смотри скриншот в var/failures/ и чини src/browser/selectors.ts.");
     }

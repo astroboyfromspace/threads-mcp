@@ -39,11 +39,37 @@ type Deps = {
 
 type Options = { target: number; limit: number };
 
-/** Ошибки, после которых продолжать бессмысленно: обе означают сломанный сбор, а не неудачное слово. */
-const FATAL = new Set(["NEEDS_LOGIN", "SELECTOR_MISS"]);
+/**
+ * Ошибки, после которых продолжать бессмысленно: сломан не запрос, а сам сбор.
+ * Истёкшая сессия и переехавшая вёрстка чинятся только руками, неверный токен —
+ * тем более, и повторять их значит молотить впустую до конца ротации.
+ */
+const FATAL = new Set(["NEEDS_LOGIN", "SELECTOR_MISS", "UNAUTHORIZED"]);
 
-/** Подряд идущих неудачных слов, после которых прогон явно не в порядке — например, токен неверный. */
+/**
+ * Ошибки, которые чаще всего проходят сами: подвисший браузер, оборванный
+ * запрос, таймаут страницы. Их стоит повторить — неудачный поиск не тратит
+ * суточную квоту (сервис считает только успешные), так что упорство обходится
+ * лишь временем.
+ */
+const TRANSIENT = new Set(["INTERNAL", "UPSTREAM", "TIMEOUT"]);
+
+/** Растущие паузы перед повтором временной ошибки: одному слову даётся четыре захода. */
+const TRANSIENT_PAUSES_MS = [30_000, 90_000, 180_000];
+
+/** Подряд идущих неудачных слов, после которых прогон уходит на передышку. */
 const MAX_CONSECUTIVE_ERRORS = 5;
+
+/**
+ * Передышка после серии неудач: обычно это значит, что браузер на той стороне
+ * лёг и ему нужно время, а не что прогон пора хоронить. Раньше пять неудач
+ * подряд заканчивали сбор насовсем — из-за получасовой хмури терялась вся
+ * оставшаяся ротация.
+ */
+const COOLDOWN_MS = 10 * 60 * 1_000;
+
+/** Сколько передышек подряд без единого успеха терпим, прежде чем сдаться. */
+const MAX_COOLDOWNS = 3;
 
 /** Растущая пауза перед повтором RATE_LIMITED: используется, если сервис не прислал свой retry_after. */
 const RATE_LIMIT_PAUSES_MS = [60_000, 180_000, 600_000];
@@ -114,39 +140,62 @@ class QuotaExhaustedError extends Error {
 }
 
 /**
- * Зовёт поиск с повтором на RATE_LIMITED: до трёх повторов сверх исходного
- * захода, с растущей паузой 60/180/600 секунд — или с паузой из retry_after
- * ответа, если сервис её прислал. Пауза в любом случае не превышает
- * RATE_LIMIT_PAUSE_CAP_MS. Если retry_after сам по себе больше этого
- * потолка — это не короткая заминка, а исчерпанная суточная квота, и
- * повторять нет смысла: бросаем QuotaExhaustedError, не сделав ни одной
- * попытки повтора. После исчерпания обычных повторов бросает последнюю
- * ошибку — слово считается неудачным по общим правилам.
+ * Зовёт действие сервиса, переживая всё, что переживаемо.
+ *
+ * RATE_LIMITED: до трёх повторов сверх исходного захода, с растущей паузой
+ * 60/180/600 секунд — или с паузой из retry_after ответа, если сервис её
+ * прислал; пауза в любом случае не превышает RATE_LIMIT_PAUSE_CAP_MS. Если
+ * retry_after сам по себе больше этого потолка — это не заминка, а исчерпанная
+ * суточная квота, повторять нечего: бросаем QuotaExhaustedError сразу.
+ *
+ * Временные ошибки (TRANSIENT): до трёх повторов с паузой 30/90/180 секунд.
+ *
+ * Всё остальное — включая FATAL — уходит наверх с первой же попытки.
  */
-async function searchWithRetry(
-  client: ThreadsClient,
-  word: string,
-  limit: number,
+async function callWithRetry<T>(
+  label: string,
+  work: () => Promise<T>,
   sleep: (ms: number) => Promise<void>,
   log: (message: string) => void,
-): Promise<{ query: string; posts: PostCardDto[] }> {
-  for (let retry = 0; ; retry += 1) {
-    try {
-      return await withHeartbeat(word, log, () => client.searchPosts(word, limit));
-    } catch (error) {
-      if (codeOf(error) !== "RATE_LIMITED") throw error;
+): Promise<T> {
+  let rateRetry = 0;
+  let transientRetry = 0;
 
-      const retryAfterSeconds = retryAfterOf(error);
-      if (retryAfterSeconds !== undefined && retryAfterSeconds * 1_000 > RATE_LIMIT_PAUSE_CAP_MS) {
-        throw new QuotaExhaustedError(word, retryAfterSeconds);
+  for (;;) {
+    try {
+      return await withHeartbeat(label, log, work);
+    } catch (error) {
+      const code = codeOf(error);
+
+      if (code === "RATE_LIMITED") {
+        const retryAfterSeconds = retryAfterOf(error);
+        if (retryAfterSeconds !== undefined && retryAfterSeconds * 1_000 > RATE_LIMIT_PAUSE_CAP_MS) {
+          throw new QuotaExhaustedError(label, retryAfterSeconds);
+        }
+        if (rateRetry >= RATE_LIMIT_PAUSES_MS.length) throw error;
+
+        const wanted = retryAfterSeconds !== undefined ? retryAfterSeconds * 1_000 : RATE_LIMIT_PAUSES_MS[rateRetry]!;
+        const pauseMs = Math.min(wanted, RATE_LIMIT_PAUSE_CAP_MS);
+        rateRetry += 1;
+        log(`${label}: RATE_LIMITED, повтор через ${Math.round(pauseMs / 1_000)}с`);
+        await sleep(pauseMs);
+        continue;
       }
 
-      if (retry >= RATE_LIMIT_PAUSES_MS.length) throw error;
+      if (TRANSIENT.has(code) && !FATAL.has(code)) {
+        if (transientRetry >= TRANSIENT_PAUSES_MS.length) throw error;
 
-      const wanted = retryAfterSeconds !== undefined ? retryAfterSeconds * 1_000 : RATE_LIMIT_PAUSES_MS[retry]!;
-      const pauseMs = Math.min(wanted, RATE_LIMIT_PAUSE_CAP_MS);
-      log(`${word}: RATE_LIMITED, повтор через ${Math.round(pauseMs / 1_000)}с`);
-      await sleep(pauseMs);
+        const pauseMs = TRANSIENT_PAUSES_MS[transientRetry]!;
+        transientRetry += 1;
+        log(
+          `${label}: ошибка ${code}${messageOf(error)} — повтор ${transientRetry}/${TRANSIENT_PAUSES_MS.length} ` +
+            `через ${Math.round(pauseMs / 1_000)}с`,
+        );
+        await sleep(pauseMs);
+        continue;
+      }
+
+      throw error;
     }
   }
 }
@@ -207,7 +256,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
 
   try {
     log(`лента: запрашиваю ${options.limit} постов`);
-    const feed = await withHeartbeat("лента", log, () => client.readFeed(options.limit));
+    const feed = await callWithRetry("лента", () => client.readFeed(options.limit), sleep, log);
     const { stored, droppedNoUrl: feedDropped } = splitStored(feed, "feed", null);
     const added = db.insertPosts(stored, now());
     newPosts += added;
@@ -232,6 +281,8 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
   // токен иначе сжигает всю ротацию — 82 слова получают свежий last_run_at и
   // ноль постов, — поэтому прерываемся раньше.
   let consecutiveErrors = 0;
+  /** Передышек подряд без единого успеха: успешное слово обнуляет счёт. */
+  let cooldowns = 0;
 
   /** Строка состояния: по ней видно, куда прогон пришёл, не листая лог назад. */
   const progress = (): string =>
@@ -241,7 +292,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
     const step = `[${index + 1}/${words.length}]`;
     try {
       log(`${step} ищу «${word}» — ${progress()}`);
-      const found = await searchWithRetry(client, word, options.limit, sleep, log);
+      const found = await callWithRetry(word, () => client.searchPosts(word, options.limit), sleep, log);
       const { stored, droppedNoUrl: wordDropped } = splitStored(found.posts, "search", word);
 
       const added = db.insertPosts(stored, now());
@@ -249,6 +300,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
       droppedNoUrl += wordDropped;
       queriesUsed += 1;
       consecutiveErrors = 0;
+      cooldowns = 0;
       db.recordRun(word, { newPosts: added }, now());
       log(`${step} «${word}»: +${added} — ${progress()}`);
     } catch (error) {
@@ -269,8 +321,21 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
       db.recordError(word, code, now());
       log(`${step} «${word}»: ошибка ${code}${messageOf(error)} — ${progress()}`);
 
+      // Серия неудач — повод переждать, а не бросать ротацию: чаще всего это
+      // прилёгший браузер на той стороне. Сдаёмся, только если и передышки
+      // подряд не принесли ни одного успешного слова.
       if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-        return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: "too_many_errors" };
+        cooldowns += 1;
+        if (cooldowns >= MAX_COOLDOWNS) {
+          log(`сдаюсь: ${MAX_COOLDOWNS} передышки подряд не помогли`);
+          return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: "too_many_errors" };
+        }
+        log(
+          `${consecutiveErrors} слов подряд с ошибкой — передышка ${Math.round(COOLDOWN_MS / 60_000)} мин ` +
+            `(${cooldowns}/${MAX_COOLDOWNS})`,
+        );
+        await sleep(COOLDOWN_MS);
+        consecutiveErrors = 0;
       }
     }
 

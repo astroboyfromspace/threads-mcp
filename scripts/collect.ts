@@ -11,10 +11,28 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { Agent, setGlobalDispatcher } from "undici";
 import { ArgsError, parseArgs } from "../src/collect/args.js";
 import { toCsv } from "../src/collect/csv.js";
 import { openCollectDb } from "../src/collect/db.js";
 import { runCollection, type PostCardDto, type ThreadsClient } from "../src/collect/runner.js";
+
+/**
+ * Один поиск — это скролл живой страницы, и в плохой день сервис отвечает
+ * минутами. Undici по умолчанию рвёт запрос, если заголовки не пришли за пять
+ * минут, и отдаёт голое «fetch failed»: прогон терял слово там, где надо было
+ * просто подождать. Даём запасу до получаса, но держим короткий таймаут
+ * соединения — упавший сервис должен обнаруживаться сразу, а не через полчаса.
+ */
+const REQUEST_TIMEOUT_MS = 30 * 60 * 1_000;
+
+setGlobalDispatcher(
+  new Agent({
+    headersTimeout: REQUEST_TIMEOUT_MS,
+    bodyTimeout: REQUEST_TIMEOUT_MS,
+    connect: { timeout: 10_000 },
+  }),
+);
 
 async function main(): Promise<void> {
   const dataDir = resolve(process.env.DATA_DIR ?? "./var");
@@ -50,10 +68,17 @@ async function main(): Promise<void> {
         body: JSON.stringify(input),
       }).catch((error: unknown) => {
         const cause = error instanceof Error && error.cause instanceof Error ? `: ${error.cause.message}` : "";
-        throw new Error(`${action} — запрос не дошёл${cause}`, { cause: error });
+        throw Object.assign(new Error(`${action} — запрос не дошёл${cause}`, { cause: error }), { code: "UPSTREAM" });
       });
 
-      const payload = (await response.json()) as
+      // Ответ не по протоколу (502 от прокси, обрыв, HTML вместо json) — это
+      // временная беда конкретного запроса, а не сломанный сбор. Отдаём её
+      // прогону кодом UPSTREAM, чтобы он повторил, а не считал слово мёртвым.
+      const payload = (await response.json().catch(() => {
+        throw Object.assign(new Error(`${action} — ответ не разобрать (HTTP ${response.status})`), {
+          code: "UPSTREAM",
+        });
+      })) as
         | { ok: true; data: T }
         | { ok: false; error: { code: string; message: string; retry_after?: number } };
 

@@ -89,7 +89,9 @@ describe("runCollection", () => {
     let call = 0;
     client.searchPosts = vi.fn(async (query: string) => {
       call += 1;
-      if (call === 1) throw Object.assign(new Error("сломалось"), { code: "INTERNAL" });
+      // Код нарочно неповторяемый: временные ошибки прогон переспрашивает,
+      // и тогда «второй вызов» был бы вторым заходом на то же слово.
+      if (call === 1) throw Object.assign(new Error("сломалось"), { code: "INVALID_INPUT" });
       return { query, posts: [card(`https://t/ok-${call}`)] };
     });
 
@@ -126,19 +128,24 @@ describe("runCollection", () => {
     expect(db.lastError("a")).toBe("INTERNAL");
   });
 
-  // Пять неудачных слов подряд — явный признак сломанного прогона (например,
-  // неверный токен), а не невезения на конкретных словах.
-  it("останавливается после пяти неудачных слов подряд", async () => {
-    db.syncQueries(["d", "e"]); // теперь 5 слов: a..e
+  // Пять неудачных слов подряд больше не хоронят прогон: сначала передышка.
+  it("пять неудачных слов подряд — передышка, а не конец прогона", async () => {
+    db.syncQueries(["d", "e", "f"]); // теперь 6 слов: a..f
     const client = fakeClient(0);
-    client.searchPosts = vi.fn(async () => {
-      throw Object.assign(new Error("сломалось"), { code: "INTERNAL" });
+    client.searchPosts = vi.fn(async (query: string) => {
+      if (query === "f") return { query, posts: [card("https://t/f")] };
+      throw Object.assign(new Error("сломалось"), { code: "INVALID_INPUT" });
     });
+    const pauses: number[] = [];
 
-    const report = await runCollection({ db, client, sleep: async () => {} }, { target: 1000, limit: 1 });
+    const report = await runCollection(
+      { db, client, sleep: async (ms) => void pauses.push(ms) },
+      { target: 1000, limit: 1 },
+    );
 
-    expect(report.stoppedBy).toBe("too_many_errors");
-    expect(client.searchPosts).toHaveBeenCalledTimes(5);
+    expect(report.stoppedBy).toBe("queries_exhausted");
+    expect(client.searchPosts).toHaveBeenCalledTimes(6);
+    expect(pauses).toContain(10 * 60 * 1_000);
   });
 
   // Успешный заход должен сбрасывать счётчик подряд идущих неудач.
@@ -152,7 +159,7 @@ describe("runCollection", () => {
       // сброса счётчика прогон встал бы на четвёртой; со сбросом он проходит
       // всю ротацию до конца.
       if (call === 3) return { query, posts: [card(`https://t/ok-${call}`)] };
-      throw Object.assign(new Error("сломалось"), { code: "INTERNAL" });
+      throw Object.assign(new Error("сломалось"), { code: "INVALID_INPUT" });
     });
 
     const report = await runCollection({ db, client, sleep: async () => {} }, { target: 1000, limit: 1 });
@@ -367,4 +374,79 @@ it("докладывает о ходе прогона: слово, счёт и �
   } finally {
     vi.useRealTimers();
   }
+});
+
+// Устойчивость: подвисший браузер на той стороне — обычное дело, и прогон
+// должен его пережидать, а не заканчиваться на первой же серии неудач.
+describe("самовосстановление", () => {
+  const transient = (message: string) => Object.assign(new Error(message), { code: "INTERNAL" });
+
+  it("повторяет временную ошибку и в итоге забирает посты", async () => {
+    const client = fakeClient(0);
+    let attempts = 0;
+    client.searchPosts = vi.fn(async (query: string) => {
+      attempts += 1;
+      if (attempts < 3) throw transient("fetch failed");
+      return { query, posts: [card(`https://t/${query}`)] };
+    });
+    const pauses: number[] = [];
+
+    const report = await runCollection(
+      { db, client, sleep: async (ms) => void pauses.push(ms) },
+      { target: 1, limit: 1 },
+    );
+
+    expect(report.newPosts).toBe(1);
+    expect(report.errors).toBe(0);
+    // Два повтора по растущей паузе — и только потом успех.
+    expect(pauses.slice(0, 2)).toEqual([30_000, 90_000]);
+  });
+
+  it("после серии неудач берёт передышку и продолжает ротацию", async () => {
+    db.syncQueries(["a", "b", "c", "d", "e", "f"]);
+    const client = fakeClient(0);
+    let calls = 0;
+    client.searchPosts = vi.fn(async (query: string) => {
+      calls += 1;
+      // Первые пять слов (по четыре захода каждое) валятся, шестое живое.
+      if (calls <= 5 * 4) throw transient("fetch failed");
+      return { query, posts: [card(`https://t/${query}`)] };
+    });
+    const pauses: number[] = [];
+
+    const report = await runCollection(
+      { db, client, sleep: async (ms) => void pauses.push(ms) },
+      { target: 1, limit: 1 },
+    );
+
+    expect(report.stoppedBy).toBe("target_reached");
+    expect(report.newPosts).toBe(1);
+    expect(pauses).toContain(10 * 60 * 1_000);
+  });
+
+  it("сдаётся, только если и передышки не помогли", async () => {
+    db.syncQueries(Array.from({ length: 40 }, (_, i) => `w${i}`));
+    const client = fakeClient(0);
+    client.searchPosts = vi.fn(async () => {
+      throw transient("fetch failed");
+    });
+
+    const report = await runCollection({ db, client, sleep: async () => {} }, { target: 1, limit: 1 });
+
+    expect(report.stoppedBy).toBe("too_many_errors");
+    // Три передышки по пять слов — пятнадцать слов, а не пять, как раньше.
+    expect(report.errors).toBe(15);
+  });
+
+  it("неверный токен не повторяет — это не лечится ожиданием", async () => {
+    const client = fakeClient(0);
+    client.searchPosts = vi.fn(async () => {
+      throw Object.assign(new Error("Нужен корректный Bearer-токен"), { code: "UNAUTHORIZED" });
+    });
+
+    const report = await runCollection({ db, client, sleep: async () => {} }, { target: 1, limit: 1 });
+
+    expect(report.stoppedBy).toBe("UNAUTHORIZED");
+    expect(client.searchPosts).toHaveBeenCalledTimes(1);
+  });
 });

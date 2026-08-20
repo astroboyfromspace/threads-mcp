@@ -23,10 +23,21 @@ export PATH
 mkdir -p var
 LOG="var/cron.log"
 
+# Ровно в 05:00:00 каждый день ходит робот, а не человек. Случайная задержка до
+# получаса (в секундах, чтобы старт не приходился и на круглую минуту) размывает
+# расписание. MAX_DELAY=0 отключает её — этим пользуются ручные проверки.
+MAX_DELAY="${MAX_DELAY:-1800}"
+DELAY=0
+if [[ "$MAX_DELAY" -gt 0 ]]; then
+  DELAY=$((RANDOM % (MAX_DELAY + 1)))
+fi
+
 TARGET="${1:-500}"
 shift 2>/dev/null || true
 
 {
+  echo "=== $(date '+%Y-%m-%d %H:%M:%S %Z') — подъём, ждём $DELAY с перед стартом ==="
+  sleep "$DELAY"
   echo "=== $(date '+%Y-%m-%d %H:%M:%S %Z') — запуск на $TARGET постов ==="
   if ! command -v npm >/dev/null; then
     echo "npm не найден (PATH=$PATH) — прогон не начат."

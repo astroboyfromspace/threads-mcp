@@ -14,6 +14,7 @@ import {
   URLS,
 } from "./selectors.js";
 import { captureFailure, humanDelay, session } from "./session.js";
+import { finishProbe, measure, noteCard, noteFail, startProbe, startRound } from "./probe.js";
 
 /** Ищет элемент нужной роли по любой из подписей (интерфейс может быть на русском или английском). */
 function byLabels(scope: Page | Locator, role: "button" | "menuitem", labels: readonly RegExp[]): Locator {
@@ -352,19 +353,32 @@ async function collectPosts(page: Page, limit: number, label: string, options: C
   const parsedHrefs = new Set<string>();
   let idleRounds = 0;
 
+  startProbe(label, limit);
+
   // Лента бесконечная и подгружается лениво, поэтому скроллим до тех пор, пока
   // появляются новые посты, но не дольше нескольких безрезультатных попыток.
   while (seen.size < limit && idleRounds < 4) {
     const before = seen.size;
+    const round = startRound();
 
     const containers = await page.locator(POST_CONTAINER).all();
+    round.containers = containers.length;
     for (const container of containers) {
       if (seen.size >= limit) break;
 
-      const href = await container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null);
-      if (href && parsedHrefs.has(href)) continue;
+      const [href, hrefMs] = await measure(() =>
+        container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null),
+      );
+      round.hrefMs += hrefMs;
+      if (href && parsedHrefs.has(href)) {
+        round.skipped += 1;
+        continue;
+      }
 
-      const item = await itemFrom(container, href);
+      const [item, cardMs] = await measure(() => itemFrom(container, href));
+      round.cardMs += cardMs;
+      round.parsed += 1;
+      noteCard(cardMs);
       if (!item) continue;
       if (href) parsedHrefs.add(href);
 
@@ -376,8 +390,13 @@ async function collectPosts(page: Page, limit: number, label: string, options: C
     if (seen.size === before) idleRounds += 1;
     else idleRounds = 0;
 
-    if (seen.size < limit) await scrollDown(page);
+    if (seen.size < limit) {
+      const [, scrollMs] = await measure(() => scrollDown(page));
+      round.scrollMs = scrollMs;
+    }
   }
+
+  finishProbe(seen.size);
 
   if (seen.size === 0) {
     if (options.allowEmpty) return [];
@@ -424,7 +443,10 @@ async function itemFrom(container: Locator, href: string | null): Promise<FeedIt
     .locator(POST_TIME)
     .first()
     .getAttribute("datetime", { timeout: CARD_TIMEOUT_MS })
-    .catch(() => null);
+    .catch(() => {
+      noteFail("time");
+      return null;
+    });
 
   return buildCard({
     href,
@@ -474,10 +496,16 @@ async function labelOf(container: Locator, labels: readonly RegExp[]): Promise<s
   const button = buttonByLabels(container, labels).first();
   if ((await button.count().catch(() => 0)) === 0) return null;
 
-  const text = await button.innerText({ timeout: CARD_TIMEOUT_MS }).catch(() => "");
+  const text = await button.innerText({ timeout: CARD_TIMEOUT_MS }).catch(() => {
+    noteFail("labelText");
+    return "";
+  });
   if (text.trim()) return text;
 
-  const aria = await button.getAttribute("aria-label", { timeout: CARD_TIMEOUT_MS }).catch(() => null);
+  const aria = await button.getAttribute("aria-label", { timeout: CARD_TIMEOUT_MS }).catch(() => {
+    noteFail("labelAria");
+    return null;
+  });
   if (aria?.trim()) return aria;
 
   return FOUND_EMPTY_LABEL;
@@ -520,6 +548,7 @@ async function mediaOf(container: Locator): Promise<{ images: number; videos: nu
 
     return countMedia(raw.images, raw.videos, { minWidth: POST_MEDIA.minWidth, tolerance: POST_MEDIA.sizeTolerance });
   } catch {
+    noteFail("media");
     return null;
   }
 }
@@ -562,7 +591,10 @@ async function textOf(container: Locator): Promise<string | null> {
     // null означает «карточку не прочитать», и это не то же самое, что пустой
     // текст: пост из одного видео законно пуст, а исчезнувшая карточка должна
     // быть пропущена и разобрана заново на следующем круге скролла.
-    .catch(() => null);
+    .catch(() => {
+      noteFail("text");
+      return null;
+    });
 }
 
 /** Ключ для отсева повторов: ответ может быть и без пермалинка, тогда опознаём по тексту. */

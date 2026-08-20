@@ -276,7 +276,7 @@ describe("runCollection", () => {
 
     await runCollection({ db, client, sleep: async () => {}, log: (m) => messages.push(m) }, { target: 3, limit: 3 });
 
-    expect(messages[0]).toBe("лента: +3");
+    expect(messages.find((message) => message.startsWith("лента: +"))).toBe("лента: +3");
   });
 
   it("считает и показывает в отчёте посты без ссылки", async () => {
@@ -340,4 +340,31 @@ describe("runCollection", () => {
     expect(report.stoppedBy).toBe("queries_exhausted");
     expect(sleep).toHaveBeenCalledTimes(client.searchPosts.mock.calls.length - 1);
   });
+});
+
+// Молчащий лог во время долгого поиска — исходная жалоба: прогон видно на
+// старте и на финише, а посередине он неотличим от зависшего.
+it("докладывает о ходе прогона: слово, счёт и биение при долгом ответе", async () => {
+  vi.useFakeTimers();
+  try {
+    const client = fakeClient(2);
+    // Поиск, который отвечает не сразу: между заходом и ответом должно
+    // появиться сообщение «всё ещё жду».
+    client.searchPosts = vi.fn(async (query: string) => {
+      await vi.advanceTimersByTimeAsync(70_000);
+      return { query, posts: [card(`https://t/${query}`)] };
+    });
+
+    const messages: string[] = [];
+    await runCollection(
+      { db, client, sleep: async () => {}, log: (m) => messages.push(m) },
+      { target: 3, limit: 2 },
+    );
+
+    expect(messages).toContain("[1/3] ищу «a» — собрано 2/3, запросов 0, ошибок 0, прошло 0с");
+    expect(messages.filter((m) => m.startsWith("a: всё ещё жду ответа")).length).toBe(2);
+    expect(messages.at(-1)).toMatch(/^\[1\/3\] «a»: \+1 — собрано 3\/3/);
+  } finally {
+    vi.useRealTimers();
+  }
 });

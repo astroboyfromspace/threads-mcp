@@ -59,6 +59,35 @@ const RATE_LIMIT_PAUSES_MS = [60_000, 180_000, 600_000];
  */
 const RATE_LIMIT_PAUSE_CAP_MS = 15 * 60 * 1_000;
 
+/**
+ * Через сколько молчания сообщать, что запрос всё ещё идёт. Один поиск — это
+ * скролл живой страницы, он спокойно занимает минуту, и всё это время лог
+ * молчал: со стороны прогон было не отличить от зависшего.
+ */
+const HEARTBEAT_MS = 30_000;
+
+/** Длительность по-человечески: «47с», «4м12с». */
+function humanMs(ms: number): string {
+  const seconds = Math.round(ms / 1_000);
+  if (seconds < 60) return `${seconds}с`;
+  return `${Math.floor(seconds / 60)}м${String(seconds % 60).padStart(2, "0")}с`;
+}
+
+/**
+ * Гоняет работу, пока раз в HEARTBEAT_MS докладывая, что она ещё не кончилась.
+ * Таймер снимается в finally, поэтому висящий процесс после ответа не остаётся.
+ */
+async function withHeartbeat<T>(label: string, log: (message: string) => void, work: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  const timer = setInterval(() => log(`${label}: всё ещё жду ответа, ${humanMs(Date.now() - startedAt)}`), HEARTBEAT_MS);
+  timer.unref?.();
+  try {
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 /** Сообщение ошибки: без него в логе остаётся голый код, по которому нечего чинить. */
 const messageOf = (error: unknown): string =>
   error instanceof Error && error.message ? `: ${error.message}` : "";
@@ -103,7 +132,7 @@ async function searchWithRetry(
 ): Promise<{ query: string; posts: PostCardDto[] }> {
   for (let retry = 0; ; retry += 1) {
     try {
-      return await client.searchPosts(word, limit);
+      return await withHeartbeat(word, log, () => client.searchPosts(word, limit));
     } catch (error) {
       if (codeOf(error) !== "RATE_LIMITED") throw error;
 
@@ -174,8 +203,11 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
 
   // Лента идёт первой и ровно одним заходом. Она персонализирована, и при
   // большом объёме заполнила бы датасет десятком одних и тех же авторов.
+  const startedAt = Date.now();
+
   try {
-    const feed = await client.readFeed(options.limit);
+    log(`лента: запрашиваю ${options.limit} постов`);
+    const feed = await withHeartbeat("лента", log, () => client.readFeed(options.limit));
     const { stored, droppedNoUrl: feedDropped } = splitStored(feed, "feed", null);
     const added = db.insertPosts(stored, now());
     newPosts += added;
@@ -201,8 +233,14 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
   // ноль постов, — поэтому прерываемся раньше.
   let consecutiveErrors = 0;
 
+  /** Строка состояния: по ней видно, куда прогон пришёл, не листая лог назад. */
+  const progress = (): string =>
+    `собрано ${newPosts}/${options.target}, запросов ${queriesUsed}, ошибок ${errors}, прошло ${humanMs(Date.now() - startedAt)}`;
+
   for (const [index, word] of words.entries()) {
+    const step = `[${index + 1}/${words.length}]`;
     try {
+      log(`${step} ищу «${word}» — ${progress()}`);
       const found = await searchWithRetry(client, word, options.limit, sleep, log);
       const { stored, droppedNoUrl: wordDropped } = splitStored(found.posts, "search", word);
 
@@ -212,7 +250,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
       queriesUsed += 1;
       consecutiveErrors = 0;
       db.recordRun(word, { newPosts: added }, now());
-      log(`${word}: +${added} (всего ${newPosts})`);
+      log(`${step} «${word}»: +${added} — ${progress()}`);
     } catch (error) {
       if (error instanceof QuotaExhaustedError) {
         log(error.message);
@@ -229,7 +267,7 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
       // Не recordRun: last_run_at и runs остаются как были, иначе неудачное
       // слово уедет в конец очереди ротации, ничего не собрав.
       db.recordError(word, code, now());
-      log(`${word}: ошибка ${code}${messageOf(error)}`);
+      log(`${step} «${word}»: ошибка ${code}${messageOf(error)} — ${progress()}`);
 
       if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
         return { newPosts, queriesUsed, errors, droppedNoUrl, stoppedBy: "too_many_errors" };
@@ -242,7 +280,9 @@ export async function runCollection(deps: Deps, options: Options): Promise<Colle
 
     // Пауза между запросами, а не после последнего: ждать перед выходом незачем.
     if (index < words.length - 1) {
-      await sleep(5_000 + Math.floor(Math.random() * 10_000));
+      const pauseMs = 5_000 + Math.floor(Math.random() * 10_000);
+      log(`пауза ${Math.round(pauseMs / 1_000)}с`);
+      await sleep(pauseMs);
     }
   }
 

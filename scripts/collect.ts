@@ -41,10 +41,16 @@ async function main(): Promise<void> {
 
     /** Ходит в сервис тем же способом, что и любой другой клиент: POST /actions/:name. */
     async function call<T>(action: string, input: unknown): Promise<T> {
+      // fetch падает голым «fetch failed», а настоящая причина (обрыв, таймаут
+      // заголовков undici на пятой минуте) лежит в cause. Без неё в логе
+      // остаётся сообщение, по которому нечего чинить.
       const response = await fetch(`${baseUrl}/actions/${action}`, {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
         body: JSON.stringify(input),
+      }).catch((error: unknown) => {
+        const cause = error instanceof Error && error.cause instanceof Error ? `: ${error.cause.message}` : "";
+        throw new Error(`${action} — запрос не дошёл${cause}`, { cause: error });
       });
 
       const payload = (await response.json()) as
@@ -73,19 +79,24 @@ async function main(): Promise<void> {
 
     db.syncQueries(words);
 
-    console.log(`Старт: цель ${args.target} новых постов, ${words.length} слов, база ${dbPath}`);
+    // Метка времени у каждой строки: по логу должно быть видно не только что
+    // произошло, но и когда — сколько занял поиск и где прогон встал.
+    const stamp = (): string => new Date().toISOString().slice(11, 19);
+    const say = (message: string): void => console.log(`[${stamp()}] ${message}`);
+
+    say(`Старт: цель ${args.target} новых постов, ${words.length} слов, база ${dbPath}`);
 
     const report = await runCollection(
       {
         db,
         client,
         sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
-        log: (message) => console.log(message),
+        log: say,
       },
       { target: args.target, limit: args.limit },
     );
 
-    console.log(
+    say(
       `Готово: +${report.newPosts} новых, запросов ${report.queriesUsed}, ошибок ${report.errors}, ` +
         `без ссылки отброшено ${report.droppedNoUrl}, остановка — ${report.stoppedBy}. ` +
         `Всего в базе ${db.totalPosts()}.`,

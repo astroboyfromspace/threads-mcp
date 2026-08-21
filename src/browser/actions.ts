@@ -264,10 +264,7 @@ export async function readReplies(postUrl: string, limit = 20): Promise<ThreadVi
     // Часть ответов Threads прячет как подозрительные и показывает отдельной
     // страницей. Под чужими постами так уходит большинство комментариев: агент,
     // спросивший «что ответили», без них увидел бы пустоту вместо ответов.
-    const hiddenHref =
-      replies.length < limit
-        ? await page.locator('a[href*="hidden_replies"]').first().getAttribute("href").catch(() => null)
-        : null;
+    const hiddenHref = replies.length < limit ? await hiddenRepliesHref(page) : null;
 
     if (hiddenHref) {
       await open(page, new URL(hiddenHref, URLS.home).toString());
@@ -284,6 +281,22 @@ export async function readReplies(postUrl: string, limit = 20): Promise<ThreadVi
 
     return { url, post, replies };
   });
+}
+
+/**
+ * Ссылка на страницу скрытых ответов; null — если Threads её не показывает.
+ *
+ * Ссылка необязательная: под большинством постов скрытых ответов нет вовсе, и
+ * это самый обычный исход, а не сбой. Без своего потолка каждый такой — а
+ * значит почти каждый — вызов read_replies покорно ждал умолчание Playwright в
+ * 30 секунд, чтобы узнать то, что видно сразу.
+ */
+export async function hiddenRepliesHref(page: Page): Promise<string | null> {
+  return page
+    .locator('a[href*="hidden_replies"]')
+    .first()
+    .getAttribute("href", { timeout: CARD_TIMEOUT_MS })
+    .catch(() => null);
 }
 
 /** Собирает со страницы поста сам пост и ответы под ним, подгружая их скроллом. */

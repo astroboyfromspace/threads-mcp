@@ -576,13 +576,18 @@ async function mediaOf(container: Locator): Promise<{ images: number; videos: nu
  * поднимаемся вручную и останавливаемся на границе контейнера.
  */
 async function textOf(container: Locator): Promise<string | null> {
-  return container.evaluate((el, { spanSelector, excludeSelector }) => {
+  return container.evaluate((el, { spanSelector, excludeSelector, timeSelector }) => {
     // Тот же повод для any, что и в mediaOf выше: DOM-типы недоступны tsc в
     // Node-конфигурации проекта, а сам код выполняется в браузере.
     const spans = Array.from(el.querySelectorAll(spanSelector)) as any[];
     let longest = "";
 
     for (const span of spans) {
+      // Возраст поста Threads кладёт в такой же span, только с <time> внутри.
+      // Обычно он короче текста и проигрывает по длине, но ответ из одного
+      // эмодзи ровно так же длиной в два символа — и «5m» побеждал «👍».
+      if (span.querySelector(timeSelector) || span.closest(timeSelector)) continue;
+
       let node: any = span;
       let excluded = false;
       while (node && node !== el) {
@@ -599,7 +604,7 @@ async function textOf(container: Locator): Promise<string | null> {
     }
 
     return longest;
-  }, { spanSelector: POST_TEXT_SPAN, excludeSelector: POST_TEXT_EXCLUDE }, { timeout: CARD_TIMEOUT_MS })
+  }, { spanSelector: POST_TEXT_SPAN, excludeSelector: POST_TEXT_EXCLUDE, timeSelector: POST_TIME }, { timeout: CARD_TIMEOUT_MS })
     // null означает «карточку не прочитать», и это не то же самое, что пустой
     // текст: пост из одного видео законно пуст, а исчезнувшая карточка должна
     // быть пропущена и разобрана заново на следующем круге скролла.

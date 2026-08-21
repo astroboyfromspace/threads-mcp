@@ -78,7 +78,8 @@ export const POST_TIME = "time[datetime]";
  * ссылке на поиск (href начинается с /search), возраст поста — в ссылке на
  * сам пост рядом с <time>, счётчики — внутри role="button". Если кандидатов
  * несколько (например, под цитатой лежит текст цитируемого поста), берём
- * самый длинный — см. actions.ts, textOf().
+ * самый длинный — см. actions.ts, textOf(). Возраст поста при этом отсеивается
+ * отдельно, по вложенному POST_TIME: ссылки вокруг него может и не быть.
  */
 export const POST_TEXT_SPAN = 'span[dir="auto"]';
 export const POST_TEXT_EXCLUDE = 'a[href], [role="button"]';

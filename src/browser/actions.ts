@@ -304,7 +304,7 @@ async function collectReplies(
     for (const [index, container] of containers.entries()) {
       if (collected.size >= limit) break;
 
-      const href = await container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null);
+      const href = await hrefOf(container);
       const item = await itemFrom(container, href);
       if (!item) continue;
 
@@ -366,9 +366,7 @@ async function collectPosts(page: Page, limit: number, label: string, options: C
     for (const container of containers) {
       if (seen.size >= limit) break;
 
-      const [href, hrefMs] = await measure(() =>
-        container.locator(POST_PERMALINK).first().getAttribute("href").catch(() => null),
-      );
+      const [href, hrefMs] = await measure(() => hrefOf(container));
       round.hrefMs += hrefMs;
       if (href && parsedHrefs.has(href)) {
         round.skipped += 1;
@@ -476,7 +474,7 @@ const FOUND_EMPTY_LABEL = "0";
  * карточка, которой уже нет, отсеивается сразу и разбирается заново на
  * следующем круге скролла, когда список устоится.
  */
-const CARD_TIMEOUT_MS = 2_000;
+export const CARD_TIMEOUT_MS = 2_000;
 
 /**
  * Подпись первой подходящей кнопки внутри карточки.
@@ -593,6 +591,27 @@ async function textOf(container: Locator): Promise<string | null> {
     // быть пропущена и разобрана заново на следующем круге скролла.
     .catch(() => {
       noteFail("text");
+      return null;
+    });
+}
+
+/**
+ * Ссылка на пост из его контейнера; null — если пермалинка нет или карточка
+ * уехала из DOM.
+ *
+ * Потолок здесь обязателен. Без него действует умолчание Playwright в 30
+ * секунд, и контейнер, убранный виртуальным скроллом, оплачивается полными
+ * тридцатью секундами ожидания. В прогоне 2026-08-21 таких карточек набралось
+ * 15 — 424 секунды из 493 ушли ровно сюда, при том что здоровый сбор тратит на
+ * все сто карточек полсекунды.
+ */
+export async function hrefOf(container: Locator): Promise<string | null> {
+  return container
+    .locator(POST_PERMALINK)
+    .first()
+    .getAttribute("href", { timeout: CARD_TIMEOUT_MS })
+    .catch(() => {
+      noteFail("href");
       return null;
     });
 }

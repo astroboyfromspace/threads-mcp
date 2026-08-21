@@ -15,6 +15,7 @@ import {
 } from "./selectors.js";
 import { captureFailure, humanDelay, session } from "./session.js";
 import { finishProbe, measure, noteCard, noteFail, startProbe, startRound } from "./probe.js";
+import { planScroll } from "./scroll.js";
 
 /** Ищет элемент нужной роли по любой из подписей (интерфейс может быть на русском или английском). */
 function byLabels(scope: Page | Locator, role: "button" | "menuitem", labels: readonly RegExp[]): Locator {
@@ -632,9 +633,31 @@ export async function hrefOf(container: Locator): Promise<string | null> {
 /** Ключ для отсева повторов: ответ может быть и без пермалинка, тогда опознаём по тексту. */
 const keyOf = (item: FeedItem) => item.url ?? item.text.slice(0, 120);
 
+/**
+ * Круг прокрутки: серия щелчков колеса, изредка движение курсора, пауза на
+ * подгрузку. Форма круга — в planScroll (scroll.ts), здесь только исполнение.
+ *
+ * Раньше это было одно событие ровно на 2000 пикселей ровно через 1200 мс —
+ * со стороны страницы такой ритм не похож ни на мышь, ни на трекпад. Скорость
+ * сбора при этом просела втрое, и это осознанный размен: прогон всё равно
+ * идёт в фоне по расписанию, а блокировка аккаунта стоит куда дороже
+ * потерянных минут.
+ */
 async function scrollDown(page: Page): Promise<void> {
-  await page.mouse.wheel(0, 2_000);
-  await page.waitForTimeout(1_200);
+  const plan = planScroll();
+
+  for (const [index, chunk] of plan.chunks.entries()) {
+    await page.mouse.wheel(0, chunk);
+    await page.waitForTimeout(plan.chunkPauses[index]!);
+  }
+
+  // Курсор двигаем после серии, а не до: у человека это обычно отдельное
+  // движение между прокрутками, а не одновременное с ними.
+  if (plan.mouse) {
+    await page.mouse.move(plan.mouse.x, plan.mouse.y, { steps: 8 }).catch(() => undefined);
+  }
+
+  await page.waitForTimeout(plan.pauseMs);
 }
 
 /** Пустая выдача бывает и от того, что нас разлогинило, — это другая ошибка, чем сломанный селектор. */

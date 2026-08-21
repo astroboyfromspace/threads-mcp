@@ -18,6 +18,7 @@ RUN npm ci --include=dev
 COPY tsconfig.json ./
 COPY src ./src
 COPY scripts ./scripts
+COPY deploy/start.sh ./deploy/start.sh
 RUN npm run build
 
 # Отбрасываем devDependencies после сборки — в рантайме они не нужны.
@@ -27,4 +28,7 @@ RUN mkdir -p /var/lib/threads-api && chown -R pwuser:pwuser /var/lib/threads-api
 USER pwuser
 
 EXPOSE 8080
-CMD ["node", "dist/src/main.js"]
+
+# Не сам node, а обёртка: она поднимает виртуальный экран, на котором работает
+# браузер в настоящем окне вместо headless-режима. Подробности — в скрипте.
+CMD ["/app/deploy/start.sh"]

@@ -21,6 +21,9 @@ const SCOPES = [
   "threads_manage_replies",
   "threads_read_replies",
   "threads_delete",
+  // Без него Threads не даёт отвечать под чужим корневым постом:
+  // «Cannot Reply Unless Root Post Owner».
+  "threads_keyword_search",
 ] as const;
 
 async function main(): Promise<void> {

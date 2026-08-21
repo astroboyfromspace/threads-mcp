@@ -12,10 +12,19 @@ import type { Envelope } from "../errors.js";
 
 export type ActionCaller = (name: ActionName, args: unknown) => Promise<Envelope<unknown>>;
 
-function shapeOf(definition: AnyActionDefinition): z.ZodRawShape {
+/**
+ * Поля действия для описания инструмента.
+ *
+ * Схема с .refine() — это ZodEffects поверх объекта, а не сам объект, и без
+ * разворачивания агент получал бы инструмент без единого параметра: вызвать
+ * его нечем, а бэкенд при этом требует поля. Разворачиваем до объекта.
+ */
+export function shapeOf(definition: AnyActionDefinition): z.ZodRawShape {
+  let schema: z.ZodTypeAny = definition.input;
+  while (schema instanceof z.ZodEffects) schema = schema.innerType();
   // Все действия описаны через z.object, поэтому shape всегда есть; на всякий
   // случай отдаём пустой, чтобы не падать при будущих изменениях реестра.
-  return definition.input instanceof z.ZodObject ? (definition.input.shape as z.ZodRawShape) : {};
+  return schema instanceof z.ZodObject ? (schema.shape as z.ZodRawShape) : {};
 }
 
 export function createMcpServer(call: ActionCaller): McpServer {

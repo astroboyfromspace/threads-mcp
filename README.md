@@ -101,6 +101,10 @@ curl -X POST https://<домен>/actions/reply_to_post \
   -H "Authorization: Bearer $API_TOKEN" -H "content-type: application/json" \
   -d '{"url": "https://www.threads.com/@someone/post/DcS3AZCjth1", "text": "спасибо!"}'
 
+# Ответ под чужим корневым постом Threads разрешает только с правом
+# threads_keyword_search. Если API отвечает «Cannot Reply Unless Root Post
+# Owner» — токен выдан без него, помогает повторный проход /oauth/start.
+
 # Комментарии под постом — своим или чужим
 curl -X POST https://<домен>/actions/read_replies \
   -H "Authorization: Bearer $API_TOKEN" -H "content-type: application/json" \

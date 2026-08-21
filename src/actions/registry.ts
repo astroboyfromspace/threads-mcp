@@ -87,21 +87,38 @@ export const actions = {
 
   reply_to_post: define({
     name: "reply_to_post",
-    description: "Ответить на пост в Threads. Нужен media ID поста, к которому пишем ответ.",
+    description:
+      "Ответить на пост в Threads — свой или чужой. Достаточно ссылки на пост (url); media ID (reply_to_id) можно передать, " +
+      "если он уже известен, например из get_conversation.",
     driver: "graph",
-    input: z.object({
-      reply_to_id: z.string().min(1),
-      text: z.string().min(1).max(500),
-      image_url: z.string().url().optional(),
-      reply_control: replyControl,
-    }),
+    input: z
+      .object({
+        url: postUrl.optional(),
+        reply_to_id: z.string().min(1).optional(),
+        text: z.string().min(1).max(500),
+        image_url: z.string().url().optional(),
+        reply_control: replyControl,
+      })
+      .refine((value) => Boolean(value.url ?? value.reply_to_id), {
+        message: "Нужна ссылка на пост (url) или его media ID (reply_to_id)",
+      }),
     run: async (input) => {
+      // Ссылка на пост — то единственное, что есть у агента после ленты или
+      // поиска: media ID в вёрстке не показан, а из шорткода не выводится.
+      // Поэтому по ссылке идём за ним в браузер, а сам ответ публикуем
+      // официальным API.
+      let replyToId = input.reply_to_id;
+      if (!replyToId) {
+        assertLoggedIn();
+        replyToId = (await browser.resolveMediaId(input.url!)).media_id;
+      }
+
       const { client, userId } = await getClient();
       return graph.publish(client, userId, {
         mediaType: input.image_url ? "IMAGE" : "TEXT",
         text: input.text,
         imageUrl: input.image_url,
-        replyToId: input.reply_to_id,
+        replyToId,
         replyControl: input.reply_control,
       });
     },
@@ -266,6 +283,16 @@ export const actions = {
       limit: z.number().int().min(1).max(100).default(20),
     }),
     run: (input) => browser.readReplies(input.url, input.limit),
+  }),
+
+  resolve_media_id: define({
+    name: "resolve_media_id",
+    description:
+      "Узнать media ID поста по ссылке на него. Нужен там, где API просит идентификатор, а на руках только ссылка. " +
+      "Выполняется через браузер.",
+    driver: "browser",
+    input: z.object({ url: postUrl }),
+    run: (input) => browser.resolveMediaId(input.url),
   }),
 
   read_profile: define({

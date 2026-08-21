@@ -668,3 +668,68 @@ async function assertStillLoggedIn(page: Page): Promise<void> {
     throw new ActionError("NEEDS_LOGIN", "Threads показывает страницу для незалогиненных", { retryable: false });
   }
 }
+
+const SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/** Сколько символов после pk ещё считается «рядом» — с запасом на счётчики поста. */
+const MEDIA_INFO_WINDOW = 4_000;
+
+/**
+ * Разворачивает шорткод из ссылки в pk поста.
+ *
+ * Это не media ID: pk (~3.9e18) — инстаграмный идентификатор, а Graph API
+ * принимает числа вида 17…/18… из другого пространства, и одно из другого не
+ * выводится. Здесь pk нужен только как ключ поиска нужного поста на странице.
+ */
+export function pkFromShortcode(shortcode: string): string | null {
+  let value = 0n;
+  for (const char of shortcode) {
+    const digit = SHORTCODE_ALPHABET.indexOf(char);
+    if (digit < 0) return null;
+    value = value * 64n + BigInt(digit);
+  }
+  return shortcode ? value.toString() : null;
+}
+
+/**
+ * Достаёт media ID поста из данных его страницы.
+ *
+ * В JSON страницы у каждого поста рядом с pk лежит text_post_app_info.id —
+ * это и есть идентификатор, которым оперирует Graph API. Ищем именно по pk:
+ * на странице поста лежат ещё и ответы со своими media ID, и промах здесь
+ * означал бы ответ не тому человеку.
+ */
+export function mediaIdFromPageHtml(html: string, pk: string): string | null {
+  const anchor = `"pk":"${pk}"`;
+  for (let at = html.indexOf(anchor); at >= 0; at = html.indexOf(anchor, at + anchor.length)) {
+    const found = /XDTTextPostAppMediaInfo:(\d+)/.exec(html.slice(at, at + MEDIA_INFO_WINDOW));
+    if (found) return found[1]!;
+  }
+  return null;
+}
+
+/**
+ * Находит media ID поста по ссылке на него.
+ *
+ * Официальный API не умеет искать пост по ссылке, а ответить без media ID
+ * нельзя, поэтому открываем страницу браузером и читаем ID из её же данных.
+ */
+export async function resolveMediaId(postUrl: string): Promise<{ url: string; media_id: string }> {
+  const shortcode = /\/post\/([^/?#]+)/.exec(postUrl)?.[1];
+  const pk = shortcode ? pkFromShortcode(shortcode) : null;
+  if (!pk) {
+    throw new ActionError("INVALID_INPUT", `В ссылке нет шорткода поста: ${postUrl}`, { retryable: false });
+  }
+
+  return session.withPage(async (page) => {
+    await open(page, postUrl);
+
+    const mediaId = mediaIdFromPageHtml(await page.content(), pk);
+    if (!mediaId) {
+      await assertStillLoggedIn(page);
+      return selectorMiss(page, "media-id", "Не нашёл media ID в данных страницы поста — вероятно, Threads изменил их формат");
+    }
+
+    return { url: page.url(), media_id: mediaId };
+  });
+}

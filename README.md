@@ -96,10 +96,10 @@ curl -X POST https://<домен>/post \
   -H "Authorization: Bearer $API_TOKEN" -H "content-type: application/json" \
   -d '{"text": "привет из агента"}'
 
-# Ответ на комментарий
+# Ответ на пост — свой или чужой, по обычной ссылке
 curl -X POST https://<домен>/actions/reply_to_post \
   -H "Authorization: Bearer $API_TOKEN" -H "content-type: application/json" \
-  -d '{"reply_to_id": "<media-id>", "text": "спасибо!"}'
+  -d '{"url": "https://www.threads.com/@someone/post/DcS3AZCjth1", "text": "спасибо!"}'
 
 # Комментарии под постом — своим или чужим
 curl -X POST https://<домен>/actions/read_replies \

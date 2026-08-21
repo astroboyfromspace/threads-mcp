@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Locator } from "playwright";
 import type { Page } from "playwright";
-import { CARD_TIMEOUT_MS, hiddenRepliesHref, hrefOf } from "./actions.js";
+import { CARD_TIMEOUT_MS, hiddenRepliesHref, hrefOf, mediaIdFromPageHtml, pkFromShortcode } from "./actions.js";
 
 /**
  * Контейнер-заглушка: запоминает, с какими параметрами у него спросили атрибут.
@@ -84,5 +84,44 @@ describe("ссылка на скрытые ответы", () => {
     });
 
     await expect(hiddenRepliesHref(page)).resolves.toBeNull();
+  });
+});
+
+describe("media ID поста", () => {
+  // Шорткод кодирует инстаграмный pk (~3.9e18), а Graph API работает с
+  // числами вида 17…/18…. Пара ниже снята с живого поста: id из
+  // list_my_posts против шорткода из его же пермалинка.
+  it("шорткод разворачивается в pk, а не в media ID", () => {
+    expect(pkFromShortcode("DcLvO4mCFho")).toBe("3966471627856173160");
+    expect(pkFromShortcode("DavZFN9DdZ6")).toBe("3940478508715595386");
+  });
+
+  it("посторонний символ в шорткоде — null, а не мусорное число", () => {
+    expect(pkFromShortcode("DcLvO4mCFh*")).toBeNull();
+  });
+
+  // Так этот кусок выглядит в данных страницы поста: pk и рядом
+  // text_post_app_info.id — он же media ID из Graph API.
+  const POST = (pk: string, mediaId: string) =>
+    `{"pk":"${pk}","like_count":3,"text_post_app_info":{"direct_reply_count":5,` +
+    `"id":"XDTTextPostAppMediaInfo:${mediaId}"},"id":"${pk}_76098754985"}`;
+
+  it("по pk достаёт media ID из данных страницы", () => {
+    expect(mediaIdFromPageHtml(POST("3966471627856173160", "18092329220390633"), "3966471627856173160")).toBe(
+      "18092329220390633",
+    );
+  });
+
+  // На странице поста лежат ещё и ответы — у каждого свой pk и свой media ID.
+  // Ошибиться постом здесь значит ответить не тому человеку.
+  it("среди ответов берёт media ID именно нужного поста", () => {
+    const html = [POST("111", "17976730128065505"), POST("222", "18143899879488572"), POST("333", "17980072392110306")].join(",");
+
+    expect(mediaIdFromPageHtml(html, "222")).toBe("18143899879488572");
+    expect(mediaIdFromPageHtml(html, "333")).toBe("17980072392110306");
+  });
+
+  it("поста на странице нет — null, а не чужой ID", () => {
+    expect(mediaIdFromPageHtml(POST("111", "17976730128065505"), "999")).toBeNull();
   });
 });

@@ -48,6 +48,14 @@ const postUrl = z
 
 const username = z.string().min(1).transform((value) => value.replace(/^@/, ""));
 
+/**
+ * Media ID Threads — целое число. Шорткод из ссылки (DcT5HGfGaze) им не является,
+ * и Graph отвечает на него «Param reply_to_id is not a valid threads_media ID».
+ * Шорткод мы принимаем, но разворачиваем в media ID сами.
+ */
+const MEDIA_ID = /^\d+$/;
+const SHORTCODE = /^[A-Za-z0-9_-]{5,32}$/;
+
 const replyControl = z
   .enum(["everyone", "accounts_you_follow", "mentioned_only", "parent_post_author_only", "followers_only"])
   .optional();
@@ -88,13 +96,21 @@ export const actions = {
   reply_to_post: define({
     name: "reply_to_post",
     description:
-      "Ответить на пост в Threads — свой или чужой. Достаточно ссылки на пост (url); media ID (reply_to_id) можно передать, " +
-      "если он уже известен, например из get_conversation.",
+      "Ответить на пост в Threads — свой или чужой. Достаточно ссылки на пост (url). " +
+      "reply_to_id — это media ID из get_conversation или list_my_posts, то есть число; " +
+      "шорткод из ссылки тоже примем и развернём сами. Чтобы ответить на конкретный комментарий, " +
+      "передай его reply_to_id — иначе ответ уйдёт под корневой пост.",
     driver: "graph",
     input: z
       .object({
         url: postUrl.optional(),
-        reply_to_id: z.string().min(1).optional(),
+        reply_to_id: z
+          .string()
+          .min(1)
+          .refine((value) => MEDIA_ID.test(value) || SHORTCODE.test(value), {
+            message: "Ожидался media ID (число) или шорткод поста из ссылки",
+          })
+          .optional(),
         text: z.string().min(1).max(500),
         image_url: z.string().url().optional(),
         reply_control: replyControl,
@@ -107,8 +123,16 @@ export const actions = {
       // поиска: media ID в вёрстке не показан, а из шорткода не выводится.
       // Поэтому по ссылке идём за ним в браузер, а сам ответ публикуем
       // официальным API.
+      //
+      // Шорткод в reply_to_id разворачиваем там же. Отвергать его было бы
+      // формально честнее, но бесполезнее: агент видит в ленте и в ссылках
+      // именно шорткод, принимает его за идентификатор поста и упирается в
+      // отказ Graph, из которого не следует, что делать дальше.
       let replyToId = input.reply_to_id;
-      if (!replyToId) {
+      if (replyToId && !MEDIA_ID.test(replyToId)) {
+        assertLoggedIn();
+        replyToId = (await browser.resolveMediaIdByShortcode(replyToId)).media_id;
+      } else if (!replyToId) {
         assertLoggedIn();
         replyToId = (await browser.resolveMediaId(input.url!)).media_id;
       }
@@ -213,7 +237,9 @@ export const actions = {
 
   like_post: define({
     name: "like_post",
-    description: "Поставить лайк посту по ссылке. Выполняется через браузер.",
+    description:
+      "Поставить лайк посту по ссылке. Выполняется через браузер. В ответе changed — сделали ли мы что-то прямо сейчас, " +
+      "state — итоговое состояние поста (liked). changed: false вместе с state: liked значит «лайк уже стоял».",
     driver: "browser",
     input: z.object({ url: postUrl }),
     dailyLimit: () => config.limits.likesPerDay,
@@ -222,7 +248,8 @@ export const actions = {
 
   unlike_post: define({
     name: "unlike_post",
-    description: "Снять лайк с поста по ссылке.",
+    description:
+      "Снять лайк с поста по ссылке. В ответе changed — сняли ли мы лайк прямо сейчас, state — итоговое состояние (not_liked).",
     driver: "browser",
     input: z.object({ url: postUrl }),
     dailyLimit: () => config.limits.likesPerDay,
@@ -231,7 +258,9 @@ export const actions = {
 
   follow_user: define({
     name: "follow_user",
-    description: "Подписаться на пользователя по username.",
+    description:
+      "Подписаться на пользователя по username. В ответе changed — подписались ли мы прямо сейчас, " +
+      "state — итоговое состояние (following). changed: false вместе с state: following значит «подписка уже была».",
     driver: "browser",
     input: z.object({ username }),
     dailyLimit: () => config.limits.followsPerDay,
@@ -240,7 +269,8 @@ export const actions = {
 
   unfollow_user: define({
     name: "unfollow_user",
-    description: "Отписаться от пользователя по username.",
+    description:
+      "Отписаться от пользователя по username. В ответе changed — отписались ли мы прямо сейчас, state — итоговое состояние (not_following).",
     driver: "browser",
     input: z.object({ username }),
     dailyLimit: () => config.limits.followsPerDay,
@@ -249,7 +279,8 @@ export const actions = {
 
   repost: define({
     name: "repost",
-    description: "Сделать репост поста по ссылке.",
+    description:
+      "Сделать репост поста по ссылке. В ответе changed — сделали ли мы репост прямо сейчас, state — итоговое состояние (reposted).",
     driver: "browser",
     input: z.object({ url: postUrl }),
     dailyLimit: () => config.limits.repostsPerDay,
@@ -258,7 +289,8 @@ export const actions = {
 
   remove_repost: define({
     name: "remove_repost",
-    description: "Отменить свой репост поста.",
+    description:
+      "Отменить свой репост поста. В ответе changed — сняли ли мы репост прямо сейчас, state — итоговое состояние (not_reposted).",
     driver: "browser",
     input: z.object({ url: postUrl }),
     dailyLimit: () => config.limits.repostsPerDay,
@@ -288,11 +320,19 @@ export const actions = {
   resolve_media_id: define({
     name: "resolve_media_id",
     description:
-      "Узнать media ID поста по ссылке на него. Нужен там, где API просит идентификатор, а на руках только ссылка. " +
-      "Выполняется через браузер.",
+      "Узнать media ID поста по ссылке на него или по шорткоду из ссылки. Нужен там, где API просит идентификатор, " +
+      "а на руках только ссылка. Выполняется через браузер.",
     driver: "browser",
-    input: z.object({ url: postUrl }),
-    run: (input) => browser.resolveMediaId(input.url),
+    input: z
+      .object({
+        url: postUrl.optional(),
+        shortcode: z.string().regex(SHORTCODE, "Ожидался шорткод поста из ссылки").optional(),
+      })
+      .refine((value) => Boolean(value.url ?? value.shortcode), {
+        message: "Нужна ссылка на пост (url) или его шорткод (shortcode)",
+      }),
+    run: (input) =>
+      input.url ? browser.resolveMediaId(input.url) : browser.resolveMediaIdByShortcode(input.shortcode!),
   }),
 
   read_profile: define({

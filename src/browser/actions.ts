@@ -75,10 +75,31 @@ async function scopeToPost(page: Page, postUrl: string): Promise<Page | Locator>
   return containers.first();
 }
 
+/**
+ * Состояние, в котором пост или профиль оказывается после действия.
+ *
+ * Одного `changed` мало: `changed: false` означает и «уже было сделано», и
+ * могло бы означать «не удалось понять» — по журналу эти случаи не различить,
+ * а разница между ними принципиальная. Поэтому вместе с фактом изменения
+ * отдаём итоговое состояние, и «уже стоял лайк» читается однозначно.
+ */
+export type ToggleState = "liked" | "not_liked" | "reposted" | "not_reposted" | "following" | "not_following";
+
+export type ToggleResult = { changed: boolean; state: ToggleState };
+
+export const TOGGLE_STATE = {
+  like: "liked",
+  unlike: "not_liked",
+  repost: "reposted",
+  removeRepost: "not_reposted",
+  follow: "following",
+  unfollow: "not_following",
+} as const satisfies Record<string, ToggleState>;
+
 async function toggleOnPost(
   postUrl: string,
   action: "like" | "unlike" | "repost" | "removeRepost",
-): Promise<{ changed: boolean }> {
+): Promise<ToggleResult> {
   return session.withPage(async (page) => {
     await open(page, postUrl);
 
@@ -93,6 +114,7 @@ async function toggleOnPost(
     // состояние видно только в её меню: «Repost/Quote», когда репоста нет, и
     // «Remove/Quote», когда он есть.
     const isRepost = action === "repost" || action === "removeRepost";
+    const state = TOGGLE_STATE[action];
 
     const buttonLabels = isRepost ? BUTTON_LABELS.repost : BUTTON_LABELS[action];
     const button = await firstVisible(buttonByLabels(scope, buttonLabels), 3_000);
@@ -101,7 +123,7 @@ async function toggleOnPost(
       // Для лайка отсутствие кнопки может значить, что дело уже сделано.
       if (!isRepost) {
         const oppositeLabels = action === "like" ? BUTTON_LABELS.unlike : BUTTON_LABELS.like;
-        if (await firstVisible(buttonByLabels(scope, oppositeLabels), 3_000)) return { changed: false };
+        if (await firstVisible(buttonByLabels(scope, oppositeLabels), 3_000)) return { changed: false, state };
       }
       return selectorMiss(page, action, `Не нашёл кнопку «${action}» на странице поста — вероятно, Threads изменил вёрстку`);
     }
@@ -111,7 +133,7 @@ async function toggleOnPost(
 
     if (!isRepost) {
       await humanDelay();
-      return { changed: true };
+      return { changed: true, state };
     }
 
     // Пункт меню — именно menuitem, а не кнопка: среди кнопок поиск нашёл бы ту
@@ -136,14 +158,14 @@ async function toggleOnPost(
 
     if (!confirm) {
       await page.keyboard.press("Escape").catch(() => undefined);
-      if (alreadyDone) return { changed: false };
+      if (alreadyDone) return { changed: false, state };
       return selectorMiss(page, action, `Меню репоста открылось, но нужного пункта в нём нет — вероятно, Threads изменил вёрстку`);
     }
 
     await confirm.click();
     await page.waitForTimeout(1_000);
     await humanDelay();
-    return { changed: true };
+    return { changed: true, state };
   });
 }
 
@@ -152,12 +174,12 @@ export const unlikePost = (ref: PostRef) => toggleOnPost(ref.url, "unlike");
 export const repost = (ref: PostRef) => toggleOnPost(ref.url, "repost");
 export const removeRepost = (ref: PostRef) => toggleOnPost(ref.url, "removeRepost");
 
-export async function followUser(username: string): Promise<{ changed: boolean }> {
+export async function followUser(username: string): Promise<ToggleResult> {
   return session.withPage(async (page) => {
     await open(page, URLS.profile(username));
 
     const alreadyFollowing = await firstVisible(buttonByLabels(page, BUTTON_LABELS.unfollow), 3_000);
-    if (alreadyFollowing) return { changed: false };
+    if (alreadyFollowing) return { changed: false, state: TOGGLE_STATE.follow };
 
     const follow = await firstVisible(buttonByLabels(page, BUTTON_LABELS.follow), 5_000);
     if (!follow) {
@@ -167,18 +189,18 @@ export async function followUser(username: string): Promise<{ changed: boolean }
     await follow.click();
     await page.waitForTimeout(1_500);
     await humanDelay();
-    return { changed: true };
+    return { changed: true, state: TOGGLE_STATE.follow };
   });
 }
 
-export async function unfollowUser(username: string): Promise<{ changed: boolean }> {
+export async function unfollowUser(username: string): Promise<ToggleResult> {
   return session.withPage(async (page) => {
     await open(page, URLS.profile(username));
 
     const unfollow = await firstVisible(buttonByLabels(page, BUTTON_LABELS.unfollow), 5_000);
     if (!unfollow) {
       const notFollowing = await firstVisible(buttonByLabels(page, BUTTON_LABELS.follow), 3_000);
-      if (notFollowing) return { changed: false };
+      if (notFollowing) return { changed: false, state: TOGGLE_STATE.unfollow };
       return selectorMiss(page, "unfollow", `Не нашёл кнопку отписки на профиле @${username}`);
     }
 
@@ -191,7 +213,7 @@ export async function unfollowUser(username: string): Promise<{ changed: boolean
 
     await page.waitForTimeout(1_000);
     await humanDelay();
-    return { changed: true };
+    return { changed: true, state: TOGGLE_STATE.unfollow };
   });
 }
 
@@ -721,9 +743,30 @@ export function mediaIdFromPageHtml(html: string, pk: string): string | null {
  */
 export async function resolveMediaId(postUrl: string): Promise<{ url: string; media_id: string }> {
   const shortcode = /\/post\/([^/?#]+)/.exec(postUrl)?.[1];
-  const pk = shortcode ? pkFromShortcode(shortcode) : null;
-  if (!pk) {
+  if (!shortcode) {
     throw new ActionError("INVALID_INPUT", `В ссылке нет шорткода поста: ${postUrl}`, { retryable: false });
+  }
+
+  return resolveMediaIdByShortcode(shortcode, postUrl);
+}
+
+/**
+ * То же, но когда на руках один шорткод без ссылки.
+ *
+ * Так выглядит самый частый промах: шорткод виден и в адресе поста, и в выдаче
+ * читалок, поэтому его естественно принять за идентификатор поста — а Graph на
+ * него отвечает «Param reply_to_id is not a valid threads_media ID». Собрать
+ * ссылку самим нельзя: в канонический адрес входит ник автора, которого рядом с
+ * шорткодом может и не быть. Зато Threads сам разворачивает короткий адрес
+ * /t/<шорткод> в канонический, и дальше всё как с обычной ссылкой.
+ */
+export async function resolveMediaIdByShortcode(
+  shortcode: string,
+  postUrl = `${URLS.home}t/${shortcode}`,
+): Promise<{ url: string; media_id: string }> {
+  const pk = pkFromShortcode(shortcode);
+  if (!pk) {
+    throw new ActionError("INVALID_INPUT", `«${shortcode}» не похож на шорткод поста Threads`, { retryable: false });
   }
 
   return session.withPage(async (page) => {

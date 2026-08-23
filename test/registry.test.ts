@@ -16,12 +16,12 @@ vi.mock("../src/graph/token.js", () => ({
 }));
 
 vi.mock("../src/browser/actions.js", () => ({
-  likePost: vi.fn(async () => ({ changed: true })),
-  unlikePost: vi.fn(async () => ({ changed: true })),
-  followUser: vi.fn(async () => ({ changed: true })),
-  unfollowUser: vi.fn(async () => ({ changed: true })),
-  repost: vi.fn(async () => ({ changed: true })),
-  removeRepost: vi.fn(async () => ({ changed: true })),
+  likePost: vi.fn(async () => ({ changed: true, state: "liked" })),
+  unlikePost: vi.fn(async () => ({ changed: true, state: "not_liked" })),
+  followUser: vi.fn(async () => ({ changed: true, state: "following" })),
+  unfollowUser: vi.fn(async () => ({ changed: true, state: "not_following" })),
+  repost: vi.fn(async () => ({ changed: true, state: "reposted" })),
+  removeRepost: vi.fn(async () => ({ changed: true, state: "not_reposted" })),
   readFeed: vi.fn(async () => [
     {
       author: "someone",
@@ -38,6 +38,8 @@ vi.mock("../src/browser/actions.js", () => ({
   readProfile: vi.fn(async () => ({ username: "someone", posts: [] })),
   searchPosts: vi.fn(async () => ({ query: "today", sort: "recent", posts: [] })),
   readReplies: vi.fn(async () => ({ url: "https://www.threads.net/@someone/post/abc", post: null, replies: [] })),
+  resolveMediaId: vi.fn(async () => ({ url: "https://www.threads.net/@someone/post/abc", media_id: "17999" })),
+  resolveMediaIdByShortcode: vi.fn(async () => ({ url: "https://www.threads.net/@someone/post/abc", media_id: "18888" })),
 }));
 
 vi.mock("../src/browser/session.js", () => ({
@@ -99,8 +101,25 @@ describe("маршрутизация действий", () => {
   });
 
   it("ответ передаёт reply_to_id в Graph", async () => {
-    await execute("reply_to_post", { reply_to_id: "parent-1", text: "ответ" });
-    expect(vi.mocked(graph.publish).mock.calls[0]![2]).toMatchObject({ replyToId: "parent-1" });
+    await execute("reply_to_post", { reply_to_id: "18100896626255309", text: "ответ" });
+    expect(vi.mocked(graph.publish).mock.calls[0]![2]).toMatchObject({ replyToId: "18100896626255309" });
+    expect(browser.resolveMediaIdByShortcode).not.toHaveBeenCalled();
+  });
+
+  // Threads на шорткод в reply_to_id отвечает «Param reply_to_id is not a valid
+  // threads_media ID», а агент видит в ленте и в ссылках именно шорткод.
+  it("шорткод в reply_to_id разворачивает в media ID, а не отдаёт его Graph как есть", async () => {
+    await execute("reply_to_post", { reply_to_id: "DcT5HGfGaze", text: "ответ" });
+
+    expect(browser.resolveMediaIdByShortcode).toHaveBeenCalledWith("DcT5HGfGaze");
+    expect(vi.mocked(graph.publish).mock.calls[0]![2]).toMatchObject({ replyToId: "18888" });
+  });
+
+  it("без reply_to_id идёт за media ID по ссылке", async () => {
+    await execute("reply_to_post", { url: "https://www.threads.net/@someone/post/abc", text: "ответ" });
+
+    expect(browser.resolveMediaId).toHaveBeenCalledWith("https://www.threads.net/@someone/post/abc");
+    expect(vi.mocked(graph.publish).mock.calls[0]![2]).toMatchObject({ replyToId: "17999" });
   });
 });
 
@@ -113,9 +132,17 @@ describe("валидация входа", () => {
   });
 
   it("отвергает ответ без текста", async () => {
-    await expect(execute("reply_to_post", { reply_to_id: "x", text: "" })).rejects.toMatchObject({
+    await expect(execute("reply_to_post", { reply_to_id: "18100896626255309", text: "" })).rejects.toMatchObject({
       code: "INVALID_INPUT",
     });
+  });
+
+  it("отвергает reply_to_id, который не похож ни на media ID, ни на шорткод", async () => {
+    await expect(execute("reply_to_post", { reply_to_id: "@someone/post", text: "ответ" })).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+    });
+    expect(graph.publish).not.toHaveBeenCalled();
+    expect(browser.resolveMediaIdByShortcode).not.toHaveBeenCalled();
   });
 
   it("срезает собаку у username", async () => {
@@ -354,5 +381,25 @@ describe("describeActions", () => {
     expect(like).toMatchObject({ driver: "browser" });
     expect(like?.daily_limit).toBeGreaterThan(0);
     expect(publish).toMatchObject({ driver: "graph", daily_limit: null });
+  });
+});
+
+describe("media ID по ссылке и по шорткоду", () => {
+  it("по ссылке идёт обычным путём", async () => {
+    await execute("resolve_media_id", { url: "https://www.threads.net/@someone/post/abc" });
+
+    expect(browser.resolveMediaId).toHaveBeenCalledWith("https://www.threads.net/@someone/post/abc");
+    expect(browser.resolveMediaIdByShortcode).not.toHaveBeenCalled();
+  });
+
+  it("по одному шорткоду — тоже, без выдуманной ссылки", async () => {
+    await execute("resolve_media_id", { shortcode: "DcT5HGfGaze" });
+
+    expect(browser.resolveMediaIdByShortcode).toHaveBeenCalledWith("DcT5HGfGaze");
+    expect(browser.resolveMediaId).not.toHaveBeenCalled();
+  });
+
+  it("без ссылки и без шорткода — INVALID_INPUT", async () => {
+    await expect(execute("resolve_media_id", {})).rejects.toMatchObject({ code: "INVALID_INPUT" });
   });
 });

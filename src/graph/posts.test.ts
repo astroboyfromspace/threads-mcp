@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ActionError } from "../errors.js";
 import { GraphClient } from "./client.js";
-import { getQuota, publish } from "./posts.js";
+import { getProfile, getQuota, publish } from "./posts.js";
 
 type Call = { url: string; method: string; body?: string };
 
@@ -163,5 +163,34 @@ describe("getQuota", () => {
     mockFetch([{ json: { data: [] } }]);
     const quota = await getQuota(new GraphClient("tok"), "user-1");
     expect(quota.posts).toEqual({ used: 0, total: 250 });
+  });
+});
+
+describe("getProfile", () => {
+  it("отдаёт счётчик подписчиков вместе с профилем, а не отдельным вызовом", async () => {
+    const calls = mockFetch([
+      { json: { id: "user-1", username: "denisfromspace" } },
+      { json: { data: [{ name: "followers_count", total_value: { value: 1234 } }] } },
+    ]);
+
+    const profile = await getProfile(new GraphClient("tok"), "user-1");
+
+    expect(profile).toMatchObject({ username: "denisfromspace", follower_count: 1234 });
+    expect(calls[1]!.url).toContain("/user-1/threads_insights");
+    expect(calls[1]!.url).toContain("metric=followers_count");
+  });
+
+  // Счётчик живёт за отдельным разрешением: без него профиль обязан прийти
+  // целым, а не превратиться в ошибку из-за необязательного поля.
+  it("без разрешения на инсайты отдаёт профиль и объясняет, почему счётчика нет", async () => {
+    mockFetch([
+      { json: { id: "user-1", username: "denisfromspace" } },
+      { status: 400, json: { error: { message: "(#10) Application does not have permission", code: 10 } } },
+    ]);
+
+    const profile = await getProfile(new GraphClient("tok"), "user-1");
+
+    expect(profile).toMatchObject({ username: "denisfromspace", follower_count: null });
+    expect(String(profile.follower_count_error)).toContain("permission");
   });
 });

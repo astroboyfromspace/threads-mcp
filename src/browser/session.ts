@@ -13,7 +13,7 @@ import { LOGGED_OUT_HINTS, URLS } from "./selectors.js";
  */
 class BrowserSession {
   private context: BrowserContext | null = null;
-  private readonly queue = new SerialQueue(config.browser.maxQueueDepth);
+  private readonly queue = new SerialQueue(config.browser.maxQueueDepth, config.browser.maxQueueWaitMs);
   private loggedOutSince: number | null = null;
   private suspendedUntil: number | null = null;
 

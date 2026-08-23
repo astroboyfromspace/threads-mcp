@@ -193,8 +193,42 @@ export async function getQuota(client: GraphClient, userId: string): Promise<Quo
   };
 }
 
-export function getProfile(client: GraphClient, userId: string): Promise<Record<string, unknown>> {
-  return client.get(userId, {
-    fields: "id,username,name,threads_profile_picture_url,threads_biography",
-  });
+type InsightsResponse = { data?: Array<{ name?: string; total_value?: { value?: number } }> };
+
+/**
+ * Число подписчиков. В полях профиля его нет вовсе — Threads отдаёт счётчик
+ * только через инсайты, и это отдельное разрешение (threads_manage_insights).
+ *
+ * Поэтому счётчик необязательный: пока разрешение не выдано, профиль обязан
+ * приходить целым, а не падать из-за одного поля. Причину кладём рядом со
+ * значением — иначе null молча читается как «подписчиков ноль».
+ */
+async function fetchFollowerCount(
+  client: GraphClient,
+  userId: string,
+): Promise<{ follower_count: number | null; follower_count_error?: string }> {
+  try {
+    const response = await client.get<InsightsResponse>(`${userId}/threads_insights`, {
+      metric: "followers_count",
+    });
+    const value = response.data?.find((row) => row.name === "followers_count")?.total_value?.value;
+    return { follower_count: value ?? null };
+  } catch (err) {
+    return {
+      follower_count: null,
+      follower_count_error: `${err instanceof Error ? err.message : String(err)}. ` +
+        "Счётчик подписчиков требует разрешения threads_manage_insights — пройди OAuth заново: npm run auth",
+    };
+  }
+}
+
+export async function getProfile(client: GraphClient, userId: string): Promise<Record<string, unknown>> {
+  const [profile, followers] = await Promise.all([
+    client.get<Record<string, unknown>>(userId, {
+      fields: "id,username,name,threads_profile_picture_url,threads_biography",
+    }),
+    fetchFollowerCount(client, userId),
+  ]);
+
+  return { ...profile, ...followers };
 }

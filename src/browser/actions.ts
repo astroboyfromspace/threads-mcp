@@ -736,6 +736,31 @@ export function mediaIdFromPageHtml(html: string, pk: string): string | null {
 }
 
 /**
+ * Media ID Threads — 17–18 цифр, шорткод из ссылки — 11 символов base64.
+ * Цифровой шорткод теоретически возможен, поэтому за media ID считаем только
+ * заведомо более длинные числа.
+ */
+const MEDIA_ID_DIGITS = /^\d{15,}$/;
+
+/**
+ * Узнаёт media ID, если он уже на руках, — в ссылке или вместо шорткода.
+ *
+ * Ссылку часто собирают руками из media ID, который отдал get_conversation:
+ * получается /@denisfromspace/post/17967428262139577. Страницы по такому адресу
+ * нет, Threads уводит на профиль, и поиск media ID в её данных ничего не
+ * находил — снаружи это выглядело как сломанный селектор.
+ */
+export function mediaIdFromPostRef(ref: string): string | null {
+  const candidate = /\/post\/([^/?#]+)/.exec(ref)?.[1] ?? ref;
+  return MEDIA_ID_DIGITS.test(candidate) ? candidate : null;
+}
+
+/** Открылась ли именно страница поста: несуществующий адрес Threads уводит на профиль или в ленту. */
+export function isPostPage(url: string): boolean {
+  return /\/post\/[^/?#]+/.test(url);
+}
+
+/**
  * Находит media ID поста по ссылке на него.
  *
  * Официальный API не умеет искать пост по ссылке, а ответить без media ID
@@ -764,6 +789,9 @@ export async function resolveMediaIdByShortcode(
   shortcode: string,
   postUrl = `${URLS.home}t/${shortcode}`,
 ): Promise<{ url: string; media_id: string }> {
+  const ready = mediaIdFromPostRef(shortcode) ?? mediaIdFromPostRef(postUrl);
+  if (ready) return { url: postUrl, media_id: ready };
+
   const pk = pkFromShortcode(shortcode);
   if (!pk) {
     throw new ActionError("INVALID_INPUT", `«${shortcode}» не похож на шорткод поста Threads`, { retryable: false });
@@ -771,6 +799,18 @@ export async function resolveMediaIdByShortcode(
 
   return session.withPage(async (page) => {
     await open(page, postUrl);
+
+    // Страницы у несуществующего поста нет, и Threads молча уводит на профиль
+    // или в ленту. Отличить это от изменившейся вёрстки можно только здесь:
+    // дальше и там, и там просто «media ID не найден».
+    if (!isPostPage(page.url())) {
+      await assertStillLoggedIn(page);
+      throw new ActionError(
+        "INVALID_INPUT",
+        `Threads не открыл пост по этой ссылке, а увёл на ${page.url()} — вероятно, поста нет или он удалён`,
+        { retryable: false },
+      );
+    }
 
     const mediaId = mediaIdFromPageHtml(await page.content(), pk);
     if (!mediaId) {

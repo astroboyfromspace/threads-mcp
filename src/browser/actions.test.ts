@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { Locator } from "playwright";
 import type { Page } from "playwright";
-import { CARD_TIMEOUT_MS, hiddenRepliesHref, hrefOf, mediaIdFromPageHtml, pkFromShortcode } from "./actions.js";
+import {
+  CARD_TIMEOUT_MS,
+  hiddenRepliesHref,
+  hrefOf,
+  isPostPage,
+  mediaIdFromPageHtml,
+  mediaIdFromPostRef,
+  pkFromShortcode,
+} from "./actions.js";
 
 /**
  * Контейнер-заглушка: запоминает, с какими параметрами у него спросили атрибут.
@@ -123,5 +131,35 @@ describe("media ID поста", () => {
 
   it("поста на странице нет — null, а не чужой ID", () => {
     expect(mediaIdFromPageHtml(POST("111", "17976730128065505"), "999")).toBeNull();
+  });
+});
+
+// Отчёт 2026-08-25 звучал как «Threads изменил разметку», а в журнале действий
+// у всех трёх падений в ссылке вместо шорткода стоял media ID из
+// get_conversation: /@denisfromspace/post/17967428262139577. Страницы по такому
+// адресу нет, Threads уводит на профиль — и поиск media ID честно ничего не
+// находил.
+describe("media ID вместо шорткода", () => {
+  it("длинное число — это уже media ID, разворачивать нечего", () => {
+    expect(mediaIdFromPostRef("17967428262139577")).toBe("17967428262139577");
+    expect(mediaIdFromPostRef("https://www.threads.com/@denisfromspace/post/17967428262139577")).toBe(
+      "17967428262139577",
+    );
+  });
+
+  it("шорткод остаётся шорткодом", () => {
+    expect(mediaIdFromPostRef("DcLvO4mCFho")).toBeNull();
+    expect(mediaIdFromPostRef("https://www.threads.net/@attorneyryan/post/Dccqts8FOA6")).toBeNull();
+  });
+
+  // Шорткоды короткие (11 символов), и цифровой шорткод теоретически возможен —
+  // принимать его за media ID нельзя.
+  it("короткое число за media ID не принимаем", () => {
+    expect(mediaIdFromPostRef("12345678901")).toBeNull();
+  });
+
+  it("страница поста отличается от профиля, куда уводит несуществующий адрес", () => {
+    expect(isPostPage("https://www.threads.com/@attorneyryan/post/Dccqts8FOA6")).toBe(true);
+    expect(isPostPage("https://www.threads.com/@denisfromspace")).toBe(false);
   });
 });

@@ -9,6 +9,7 @@ import {
   mediaIdFromPageHtml,
   mediaIdFromPostRef,
   pkFromShortcode,
+  upstreamErrorShown,
 } from "./actions.js";
 
 /**
@@ -163,3 +164,46 @@ describe("media ID вместо шорткода", () => {
     expect(isPostPage("https://www.threads.com/@denisfromspace")).toBe(false);
   });
 });
+
+describe("страница-заглушка Threads", () => {
+  // Инцидент 2026-09-05: read_replies падал на 100% чужих постов с
+  // SELECTOR_MISS «Threads изменил вёрстку». На снимках промаха вёрстка была
+  // цела — Threads вместо поста рисовал свою заглушку «Something went wrong»
+  // с кнопкой Retry. То же самое ловил и read_profile. Сбой чужой и
+  // временный, а мы объявляли его своей фатальной поломкой.
+  it("узнаётся по тексту, когда содержимого на странице нет", async () => {
+    const page = fakeBody(0, "Профиль\nSomething went wrong, please try again later.\nRetry");
+
+    await expect(upstreamErrorShown(page)).resolves.toBe(true);
+  });
+
+  it("узнаётся и по-русски: язык интерфейса зависит от аккаунта", async () => {
+    const page = fakeBody(0, "Что-то пошло не так. Повторите попытку позже.");
+
+    await expect(upstreamErrorShown(page)).resolves.toBe(true);
+  });
+
+  // Иначе пост, в тексте которого есть «something went wrong», выдавал бы
+  // себя за сбой Threads и обрывал бы чтение живой ленты.
+  it("пост с такими же словами в тексте заглушкой не считается", async () => {
+    const page = fakeBody(7, "something went wrong with my deploy today");
+
+    await expect(upstreamErrorShown(page)).resolves.toBe(false);
+  });
+
+  it("обычная пустая страница — не заглушка", async () => {
+    const page = fakeBody(0, "For you\nNew thread\nSearch");
+
+    await expect(upstreamErrorShown(page)).resolves.toBe(false);
+  });
+});
+
+/** Страница, у которой спрашивают только число контейнеров и текст body. */
+function fakeBody(containers: number, text: string): Page {
+  return {
+    locator: (selector: string) => ({
+      count: async () => containers,
+      innerText: async () => (selector === "body" ? text : ""),
+    }),
+  } as unknown as Page;
+}

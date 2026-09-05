@@ -45,6 +45,8 @@ services:
     memswap_limit: 3g
     environment:
       DISPLAY: ":99"
+      # Страница, которая откроется в окне. Пусто — форма входа.
+      START_URL: "${START_URL:-}"
     volumes:
       - state:/var/lib/threads-api
       - ./deploy/login-session.sh:/usr/local/bin/login-session.sh:ro

@@ -10,6 +10,10 @@ set -euo pipefail
 PROFILE_DIR="${PROFILE_DIR:-/var/lib/threads-api/profile}"
 DISPLAY_NUM="${DISPLAY_NUM:-99}"
 SCREEN="${SCREEN:-1440x900x24}"
+# Что открыть в окне. По умолчанию — форма входа, ради которой сеанс и заведён.
+# Через noVNC адрес руками не вставишь (буфер обмена туда не проходит), поэтому
+# для разовых проверок страницу задаём переменной, а не набираем в строке.
+START_URL="${START_URL:-https://www.threads.net/login}"
 
 export DISPLAY=":${DISPLAY_NUM}"
 
@@ -49,15 +53,29 @@ echo
 # --no-sandbox: в контейнере нет прав на user namespaces, песочница не заводится;
 # сеанс одноразовый и нужен только для страницы логина Threads.
 chown -R pwuser:pwuser "${PROFILE_DIR}"
-CHROME=(/ms-playwright/chromium-*/chrome-linux/chrome)
+# Каталог сборки Chromium в образе Playwright сменил имя: до v1.5x это был
+# chrome-linux, теперь chrome-linux64. Жёсткий путь молча превращался в
+# «env: … No such file or directory», контейнер падал с кодом 127, а снаружи
+# это выглядело как ошибка Cloudflare — искать причину приходилось в логах
+# nginx. Поэтому ищем обе раскладки и падаем внятно, если не нашли.
+CHROME=(/ms-playwright/chromium-*/chrome-linux64/chrome /ms-playwright/chromium-*/chrome-linux/chrome)
+CHROME_BIN=""
+for candidate in "${CHROME[@]}"; do
+  if [ -x "${candidate}" ]; then CHROME_BIN="${candidate}"; break; fi
+done
+if [ -z "${CHROME_BIN}" ]; then
+  echo "Не нашёл Chromium в /ms-playwright/chromium-*/ — образ Playwright сменил раскладку каталогов." >&2
+  exit 1
+fi
+
 runuser -u pwuser -- env HOME=/home/pwuser DISPLAY="${DISPLAY}" \
-  "${CHROME[0]}" \
+  "${CHROME_BIN}" \
   --user-data-dir="${PROFILE_DIR}" \
   --no-sandbox \
   --no-first-run \
   --no-default-browser-check \
   --disable-blink-features=AutomationControlled \
   --window-size=1440,900 \
-  "https://www.threads.net/login"
+  "${START_URL}"
 
 wait

@@ -11,6 +11,7 @@ import {
   POST_TEXT_SPAN,
   POST_TIME,
   SEARCH_URL,
+  UPSTREAM_ERROR_HINTS,
   URLS,
 } from "./selectors.js";
 import { captureFailure, humanDelay, session } from "./session.js";
@@ -35,14 +36,61 @@ async function firstVisible(locator: Locator, timeoutMs = 8_000): Promise<Locato
   }
 }
 
-/** Открывает страницу и убеждается, что нас не выкинуло на форму входа. */
-async function open(page: Page, url: string): Promise<void> {
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
-  await page.waitForTimeout(1_500);
+/**
+ * Показывает ли страница заглушку Threads вместо содержимого.
+ *
+ * Одного текста мало: пост, в котором автор написал «something went wrong»,
+ * попал бы под примету и обрубил бы чтение живой ленты. Поэтому сначала
+ * смотрим, есть ли на странице хоть один контейнер поста: если содержимое
+ * приехало, никакой заглушки нет по определению.
+ */
+export async function upstreamErrorShown(page: Page): Promise<boolean> {
+  if ((await page.locator(POST_CONTAINER).count()) > 0) return false;
 
-  if (page.url().includes("/login")) {
-    session.markLoggedOut();
-    throw new ActionError("NEEDS_LOGIN", "Threads перебросил на форму входа — сессия истекла", { retryable: false });
+  const body = await page.locator("body").innerText().catch(() => "");
+  return UPSTREAM_ERROR_HINTS.some((hint) => hint.test(body));
+}
+
+/**
+ * Сколько раз перезагрузить страницу, прежде чем поверить заглушке.
+ *
+ * Сбой перемежающийся: в замерах 2026-09-05 подряд идущие заходы на один и тот
+ * же адрес то отдавали заглушку, то показывали пост. Пауза между попытками
+ * растёт, а общая цена промаха остаётся в пределах десятка секунд — меньше,
+ * чем стоит сам сбор ответов.
+ */
+const UPSTREAM_RETRIES = 2;
+const UPSTREAM_BACKOFF_MS = 4_000;
+
+/**
+ * Открывает страницу и убеждается, что нас не выкинуло на форму входа и что
+ * Threads отдал содержимое, а не свою заглушку.
+ */
+async function open(page: Page, url: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await page.waitForTimeout(1_500);
+
+    if (page.url().includes("/login")) {
+      session.markLoggedOut();
+      throw new ActionError("NEEDS_LOGIN", "Threads перебросил на форму входа — сессия истекла", { retryable: false });
+    }
+
+    if (!(await upstreamErrorShown(page))) return;
+
+    // Чужой сбой, а не наш: разметка цела, сессия жива, содержимое не приехало.
+    // Отдавать это как SELECTOR_MISS значит послать чинить селекторы, которые
+    // не ломались, — ровно так и вышло в отчёте от 2026-09-05.
+    if (attempt >= UPSTREAM_RETRIES) {
+      const screenshot = await captureFailure(page, "upstream");
+      throw new ActionError(
+        "UPSTREAM",
+        "Threads вместо содержимого показал свою заглушку «Что-то пошло не так» — сбой на его стороне, вёрстка цела",
+        { retryable: true, retryAfterSeconds: 60, details: { screenshot, url: page.url() } },
+      );
+    }
+
+    await page.waitForTimeout(UPSTREAM_BACKOFF_MS * (attempt + 1));
   }
 }
 
@@ -290,9 +338,23 @@ export async function readReplies(postUrl: string, limit = 20): Promise<ThreadVi
     const hiddenHref = replies.length < limit ? await hiddenRepliesHref(page) : null;
 
     if (hiddenHref) {
-      await open(page, new URL(hiddenHref, URLS.home).toString());
-      const hidden = await collectReplies(page, shortcode, limit - replies.length, true);
-      replies.push(...hidden.replies);
+      // Скрытые ответы — добавка к уже собранному, а не условие успеха. Если
+      // на этой странице Threads споткнётся о собственную заглушку, отдать
+      // ошибку значит выбросить всё, что уже прочитано, — молчаливо
+      // довольствуемся тем, что есть.
+      const opened = await open(page, new URL(hiddenHref, URLS.home).toString()).then(
+        () => true,
+        (err: unknown) => {
+          // Гасим только чужую заглушку. Истёкшая сессия — другое дело: о ней
+          // надо сказать, а не прятать её за неполным ответом.
+          if (err instanceof ActionError && err.code === "UPSTREAM") return false;
+          throw err;
+        },
+      );
+      if (opened) {
+        const hidden = await collectReplies(page, shortcode, limit - replies.length, true);
+        replies.push(...hidden.replies);
+      }
     }
 
     // Пост без комментариев — нормальный ответ, а не ошибка. Ошибка — когда со

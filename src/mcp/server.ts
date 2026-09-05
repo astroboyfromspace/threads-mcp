@@ -7,7 +7,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { actions, type ActionName, type AnyActionDefinition } from "../actions/registry.js";
+import { actions, type ActionName, type AnyActionDefinition, type Driver } from "../actions/registry.js";
 import type { Envelope } from "../errors.js";
 
 export type ActionCaller = (name: ActionName, args: unknown) => Promise<Envelope<unknown>>;
@@ -27,10 +27,23 @@ export function shapeOf(definition: AnyActionDefinition): z.ZodRawShape {
   return schema instanceof z.ZodObject ? (schema.shape as z.ZodRawShape) : {};
 }
 
+/**
+ * Пока что показываем агенту только браузерные инструменты.
+ *
+ * Действия через официальный Graph API Meta (driver: "graph" — publish_post,
+ * reply_to_post, list_my_posts, list_my_replies, get_conversation, delete_post,
+ * get_quota, get_my_profile) временно скрыты из MCP. В реестре они остались и
+ * по HTTP (POST /actions/<name>) по-прежнему доступны — чтобы вернуть их
+ * агенту, достаточно убрать эту проверку.
+ */
+const EXPOSED_DRIVERS: ReadonlySet<Driver> = new Set<Driver>(["browser"]);
+
 export function createMcpServer(call: ActionCaller): McpServer {
   const server = new McpServer({ name: "threads", version: "0.1.0" });
 
   for (const [name, definition] of Object.entries(actions) as Array<[ActionName, AnyActionDefinition]>) {
+    if (!EXPOSED_DRIVERS.has(definition.driver)) continue;
+
     server.tool(name, definition.description, shapeOf(definition), async (args: unknown) => {
       const envelope = await call(name, args);
       return {

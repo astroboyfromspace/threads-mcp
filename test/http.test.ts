@@ -207,22 +207,24 @@ describe("MCP по сети", () => {
     expect(response.json().result.serverInfo).toMatchObject({ name: "threads" });
   });
 
-  it("отдаёт все действия реестра как инструменты", async () => {
+  // Действия через официальный API Meta временно скрыты из MCP, см. src/mcp/server.ts.
+  it("отдаёт браузерные действия реестра как инструменты и скрывает остальные", async () => {
     const response = await rpc("tools/list", {});
     const names = response.json().result.tools.map((tool: { name: string }) => tool.name);
+    const browserActions = Object.values(actions).filter((action) => action.driver === "browser");
 
-    expect(names).toContain("publish_post");
     expect(names).toContain("like_post");
-    expect(names).toHaveLength(Object.keys(actions).length);
+    expect(names).not.toContain("publish_post");
+    expect(names).toHaveLength(browserActions.length);
   });
 
   it("выполняет действие и возвращает конверт", async () => {
     vi.mocked(execute).mockResolvedValueOnce({ id: "42" });
 
-    const response = await rpc("tools/call", { name: "publish_post", arguments: { text: "привет" } });
+    const response = await rpc("tools/call", { name: "read_feed", arguments: { limit: 5 } });
     const result = response.json().result;
 
-    expect(execute).toHaveBeenCalledWith("publish_post", { text: "привет" });
+    expect(execute).toHaveBeenCalledWith("read_feed", { limit: 5 });
     expect(JSON.parse(result.content[0].text)).toEqual({ ok: true, data: { id: "42" } });
     expect(result.isError).toBeUndefined();
   });

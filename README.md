@@ -191,6 +191,14 @@ claude mcp add --transport http threads https://твой-домен/mcp \
   --header "Authorization: Bearer ТОКЕН"
 ```
 
+Инструментами агенту сейчас отдаются только браузерные действия (лайки,
+подписки, репосты, чтение ленты и профилей, поиск, `resolve_media_id`,
+`check_login`). Действия через официальный Graph API Meta — `publish_post`,
+`reply_to_post`, `list_my_posts`, `list_my_replies`, `get_conversation`,
+`delete_post`, `get_quota`, `get_my_profile` — временно скрыты из списка
+инструментов, но по HTTP (`POST /actions/<name>`) работают как раньше. Вернуть
+их агенту — убрать проверку `EXPOSED_DRIVERS` в `src/mcp/server.ts`.
+
 Сессий сервер не держит: на каждый запрос поднимается свой экземпляр, заголовок
 `mcp-session-id` не выдаётся и не нужен. Отвечает обычным JSON, без SSE, — так
 проще проходить через прокси. Действия выполняются прямо в процессе сервиса, тем

@@ -96,22 +96,24 @@ curl -X POST https://<домен>/post \
   -H "Authorization: Bearer $API_TOKEN" -H "content-type: application/json" \
   -d '{"text": "привет из агента"}'
 
-# Ответ на пост — свой или чужой, по обычной ссылке
+# Ответ на пост — свой или чужой. Официальный API просит media ID (число), а на
+# руках после ленты или поиска обычно ссылка: разворачиваем её браузером.
+# Шорткод из ссылки (DcS3AZCjth1) идентификатором не является — Threads на него
+# отвечает «Param reply_to_id is not a valid threads_media ID»; resolve_media_id
+# принимает и ссылку (url), и шорткод (shortcode).
+curl -X POST https://<домен>/actions/resolve_media_id \
+  -H "Authorization: Bearer $API_TOKEN" -H "content-type: application/json" \
+  -d '{"url": "https://www.threads.com/@someone/post/DcS3AZCjth1"}'
+# → {"ok": true, "data": {"url": "...", "media_id": "18100896626255309"}}
+
+# Ответ в конкретную ветку — по media ID комментария (его же отдаёт get_conversation).
 curl -X POST https://<домен>/actions/reply_to_post \
   -H "Authorization: Bearer $API_TOKEN" -H "content-type: application/json" \
-  -d '{"url": "https://www.threads.com/@someone/post/DcS3AZCjth1", "text": "спасибо!"}'
+  -d '{"reply_to_id": "18100896626255309", "text": "и тебе спасибо!"}'
 
 # Ответ под чужим корневым постом Threads разрешает только с правом
 # threads_keyword_search. Если API отвечает «Cannot Reply Unless Root Post
 # Owner» — токен выдан без него, помогает повторный проход /oauth/start.
-
-# Ответ в конкретную ветку — по media ID комментария (число из get_conversation).
-# Шорткод из ссылки (DcS3AZCjth1) идентификатором не является: Threads на него
-# отвечает «Param reply_to_id is not a valid threads_media ID». Такой шорткод мы
-# принимаем и разворачиваем в media ID сами — тем же браузером, что и ссылку.
-curl -X POST https://<домен>/actions/reply_to_post \
-  -H "Authorization: Bearer $API_TOKEN" -H "content-type: application/json" \
-  -d '{"reply_to_id": "18100896626255309", "text": "и тебе спасибо!"}'
 
 # Комментарии под постом — своим или чужим
 curl -X POST https://<домен>/actions/read_replies \

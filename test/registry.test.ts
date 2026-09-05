@@ -100,26 +100,12 @@ describe("маршрутизация действий", () => {
     expect(vi.mocked(graph.publish).mock.calls[0]![2]).toMatchObject({ mediaType: "VIDEO" });
   });
 
-  it("ответ передаёт reply_to_id в Graph", async () => {
+  it("ответ передаёт reply_to_id в Graph и в браузер не ходит", async () => {
     await execute("reply_to_post", { reply_to_id: "18100896626255309", text: "ответ" });
+
     expect(vi.mocked(graph.publish).mock.calls[0]![2]).toMatchObject({ replyToId: "18100896626255309" });
+    expect(browser.resolveMediaId).not.toHaveBeenCalled();
     expect(browser.resolveMediaIdByShortcode).not.toHaveBeenCalled();
-  });
-
-  // Threads на шорткод в reply_to_id отвечает «Param reply_to_id is not a valid
-  // threads_media ID», а агент видит в ленте и в ссылках именно шорткод.
-  it("шорткод в reply_to_id разворачивает в media ID, а не отдаёт его Graph как есть", async () => {
-    await execute("reply_to_post", { reply_to_id: "DcT5HGfGaze", text: "ответ" });
-
-    expect(browser.resolveMediaIdByShortcode).toHaveBeenCalledWith("DcT5HGfGaze");
-    expect(vi.mocked(graph.publish).mock.calls[0]![2]).toMatchObject({ replyToId: "18888" });
-  });
-
-  it("без reply_to_id идёт за media ID по ссылке", async () => {
-    await execute("reply_to_post", { url: "https://www.threads.net/@someone/post/abc", text: "ответ" });
-
-    expect(browser.resolveMediaId).toHaveBeenCalledWith("https://www.threads.net/@someone/post/abc");
-    expect(vi.mocked(graph.publish).mock.calls[0]![2]).toMatchObject({ replyToId: "17999" });
   });
 });
 
@@ -137,11 +123,18 @@ describe("валидация входа", () => {
     });
   });
 
-  it("отвергает reply_to_id, который не похож ни на media ID, ни на шорткод", async () => {
-    await expect(execute("reply_to_post", { reply_to_id: "@someone/post", text: "ответ" })).rejects.toMatchObject({
-      code: "INVALID_INPUT",
-    });
+  // Threads на шорткод в reply_to_id отвечает «Param reply_to_id is not a valid
+  // threads_media ID», а агент видит в ленте и в ссылках именно шорткод. Разворачивает
+  // его отдельное браузерное resolve_media_id, поэтому здесь шорткод — просто мусор.
+  it("отвергает reply_to_id, который не media ID: шорткод и ссылку", async () => {
+    for (const replyToId of ["DcT5HGfGaze", "https://www.threads.net/@someone/post/abc"]) {
+      await expect(execute("reply_to_post", { reply_to_id: replyToId, text: "ответ" })).rejects.toMatchObject({
+        code: "INVALID_INPUT",
+      });
+    }
+
     expect(graph.publish).not.toHaveBeenCalled();
+    expect(browser.resolveMediaId).not.toHaveBeenCalled();
     expect(browser.resolveMediaIdByShortcode).not.toHaveBeenCalled();
   });
 

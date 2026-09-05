@@ -51,7 +51,8 @@ const username = z.string().min(1).transform((value) => value.replace(/^@/, ""))
 /**
  * Media ID Threads — целое число. Шорткод из ссылки (DcT5HGfGaze) им не является,
  * и Graph отвечает на него «Param reply_to_id is not a valid threads_media ID».
- * Шорткод мы принимаем, но разворачиваем в media ID сами.
+ * Развернуть шорткод или ссылку в media ID умеет браузерное resolve_media_id;
+ * действия официального API принимают уже готовое число.
  */
 const MEDIA_ID = /^\d+$/;
 const SHORTCODE = /^[A-Za-z0-9_-]{5,32}$/;
@@ -96,53 +97,30 @@ export const actions = {
   reply_to_post: define({
     name: "reply_to_post",
     description:
-      "Ответить на пост в Threads — свой или чужой. Достаточно ссылки на пост (url). " +
-      "reply_to_id — это media ID из get_conversation или list_my_posts, то есть число; " +
-      "шорткод из ссылки тоже примем и развернём сами. Чтобы ответить на конкретный комментарий, " +
-      "передай его reply_to_id — иначе ответ уйдёт под корневой пост.",
+      "Ответить на пост в Threads — свой или чужой. reply_to_id — это media ID поста или комментария, то есть число: " +
+      "его отдают get_conversation, list_my_posts, а по ссылке или шорткоду — resolve_media_id. " +
+      "Чтобы ответить на конкретный комментарий, передай его reply_to_id — иначе ответ уйдёт под корневой пост.",
     driver: "graph",
-    input: z
-      .object({
-        url: postUrl.optional(),
-        reply_to_id: z
-          .string()
-          .min(1)
-          .refine((value) => MEDIA_ID.test(value) || SHORTCODE.test(value), {
-            message: "Ожидался media ID (число) или шорткод поста из ссылки",
-          })
-          .optional(),
-        text: z.string().min(1).max(500),
-        image_url: z.string().url().optional(),
-        reply_control: replyControl,
-      })
-      .refine((value) => Boolean(value.url ?? value.reply_to_id), {
-        message: "Нужна ссылка на пост (url) или его media ID (reply_to_id)",
-      }),
+    input: z.object({
+      // Только media ID: ссылку и шорткод разворачивает браузерное
+      // resolve_media_id — здесь официальный API и ничего кроме него.
+      reply_to_id: z
+        .string()
+        .regex(
+          MEDIA_ID,
+          "Ожидался media ID (число). Ссылку или шорткод поста сначала разверни через resolve_media_id",
+        ),
+      text: z.string().min(1).max(500),
+      image_url: z.string().url().optional(),
+      reply_control: replyControl,
+    }),
     run: async (input) => {
-      // Ссылка на пост — то единственное, что есть у агента после ленты или
-      // поиска: media ID в вёрстке не показан, а из шорткода не выводится.
-      // Поэтому по ссылке идём за ним в браузер, а сам ответ публикуем
-      // официальным API.
-      //
-      // Шорткод в reply_to_id разворачиваем там же. Отвергать его было бы
-      // формально честнее, но бесполезнее: агент видит в ленте и в ссылках
-      // именно шорткод, принимает его за идентификатор поста и упирается в
-      // отказ Graph, из которого не следует, что делать дальше.
-      let replyToId = input.reply_to_id;
-      if (replyToId && !MEDIA_ID.test(replyToId)) {
-        assertLoggedIn();
-        replyToId = (await browser.resolveMediaIdByShortcode(replyToId)).media_id;
-      } else if (!replyToId) {
-        assertLoggedIn();
-        replyToId = (await browser.resolveMediaId(input.url!)).media_id;
-      }
-
       const { client, userId } = await getClient();
       return graph.publish(client, userId, {
         mediaType: input.image_url ? "IMAGE" : "TEXT",
         text: input.text,
         imageUrl: input.image_url,
-        replyToId,
+        replyToId: input.reply_to_id,
         replyControl: input.reply_control,
       });
     },
@@ -321,7 +299,7 @@ export const actions = {
     name: "resolve_media_id",
     description:
       "Узнать media ID поста по ссылке на него или по шорткоду из ссылки. Нужен там, где API просит идентификатор, " +
-      "а на руках только ссылка. Выполняется через браузер.",
+      "а на руках только ссылка: например, перед reply_to_post. Выполняется через браузер.",
     driver: "browser",
     input: z
       .object({
